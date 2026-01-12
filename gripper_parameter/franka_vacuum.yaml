@@ -1,0 +1,20 @@
+gripper:
+  name: "Schmalz_ECG_Vacuum"
+  
+  # The suction cup (The rubber part touching the object)
+  # NOTE: These values depend on the specific cup installed, not the generator body.
+  # Assuming a standard round cup.
+  suction_cup:
+    radius: 0.010       # 20mm radius (configurable)
+    height: 0.030       # 30mm height
+    compression: 0.005  # 5mm max compression (for approach logic)
+    
+  # The main gripper body (Based on Datasheet D=151.5mm, L=88.6mm)
+  # We model it as a cylinder for collision safety.
+  body:
+    radius: 0.07575     # D/2 = 151.5mm / 2 = 75.75mm
+    length: 0.0886      # L = 88.6mm
+    
+  # Safety parameters
+  safety:
+    standoff_distance: 0.05 # 5cm approach distance

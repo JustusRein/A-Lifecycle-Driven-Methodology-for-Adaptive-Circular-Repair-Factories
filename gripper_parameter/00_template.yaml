@@ -1,0 +1,76 @@
+# unit:mm
+
+
+#!!!Please enter the relevant parameter values after the colon in the variable!!!
+# Example:
+# a_pg : 25.0 # Finger width
+
+
+#################################################
+# End Effector Parameters
+
+a_pg : # Finger width
+w_pg : # Internal clearance of finger width
+v_pg : # External clearance of finger width
+f_pg : # Finger open distance (max) (width)
+g_pg : # Finger close distance (min) (width)
+h_pg : # Gripper base bottom part width
+k_pg : # Safespace Gripper base bottom width 
+q_pg : # Gripper base top part width
+r_pg : # External clearance of base top width
+
+
+b_pg : # Gripper area length
+c_pg : # Distance from gripper area to finger base clearance (length)
+d_pg : # Gripper base clearance (length)
+x_pg : # External clearance at fingertip (length)
+t_pg : # Gripper base bottom part length
+u_pg : # Gripper base top part length
+
+
+e_pg : # Finger depth
+i_pg : # External clearance of finger depth
+z_pg : # Gripper area depth
+l_pg : # Gripper base bottom part depth
+m_pg : # External clearance of gripper base bottom part depth
+o_pg : # Gripper base top part depth
+p_pg : # External clearance of gripper base top part depth
+
+
+
+# Auto-filled by code (no manual input):
+
+
+# j_pg : max(l_pg + 2*m_pg, o_pg + 2*p_pg, e_pg + 2*i_pg)  
+# Maximum depth of gripper
+
+# y_pg : max(q_pg + 2*r_pg, h_pg + 2*k_pg, f_pg + 2*(a_pg + v_pg)) 
+# Maximum width of gripper
+
+# n_pg : d_pg + c_pg + b_pg 
+# Finger length
+
+# s_pg : n_pg + t_pg + u_pg + x_pg 
+# Total gripper length
+
+#################################################
+
+
+
+#################################################
+# Robot Arm Parameters
+
+ra : # Width of last robot arm limb
+rb : # Depth of last robot arm limb
+rc : # Length of last robot arm limb
+re : # Robot arm diameter clearance
+rf : # Robot arm length clearance
+rj : #repeatability of robot arm
+
+
+# Auto-filled by code (no manual input):
+
+# rd : max(ra,rb) 
+# Maximum diameter of last robot arm limb
+
+#################################################

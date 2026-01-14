@@ -1,0 +1,34 @@
+gripper:
+  name: "Double_Schmalz_ECG"
+  
+  # Visual: Path for the detailed visual mesh (if available)
+  visual_mesh_path: null
+  
+  # Collision: Path for the detailed collision mesh (if available)
+  collision_mesh_path: null
+
+  # --- PADS ---
+  # 2 cirles suction cups side by side
+  pads:
+    - type: "circle"
+      name: "left_cup"
+      # 4cm to the left of center
+      offset: [-0.04, 0.0, 0.0] 
+      radius: 0.020 # 20mm raio
+
+    - type: "circle"
+      name: "right_cup"
+      # 4cm to the right of center
+      offset: [0.04, 0.0, 0.0]
+      radius: 0.020
+
+  # --- BODY CONFIG ---
+  # The main gripper body that holds the suction cups
+  body:
+    radius: 0.06   # Raio do corpo que segura as ventosas
+    length: 0.10   # Comprimento total do corpo
+
+  # --- SAFETY PARAMETERS ---
+  safety:
+    standoff_distance: 0.05 # Distância de aproximação (Pre-grasp)
+    collision_margin: 0.05  # Margem extra de 5% nas colisões

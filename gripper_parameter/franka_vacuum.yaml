@@ -1,20 +1,39 @@
 gripper:
-  name: "Schmalz_ECG_Vacuum"
+  name: "Schmalz_ECG_Double_Custom"
   
-  # The suction cup (The rubber part touching the object)
-  # NOTE: These values depend on the specific cup installed, not the generator body.
-  # Assuming a standard round cup.
-  suction_cup:
-    radius: 0.010       # 20mm radius (configurable)
-    height: 0.030       # 30mm height
-    compression: 0.005  # 5mm max compression (for approach logic)
-    
-  # The main gripper body (Based on Datasheet D=151.5mm, L=88.6mm)
-  # We model it as a cylinder for collision safety.
+  # Visual Asset (Optional: set to null to see the generated cylinders)
+  visual_mesh_path: null
+
+  # --- NEW: MULTI-PAD DEFINITION ---
+  # Replaces the old 'suction_cup' single entry.
+  # Modeling a custom bracket holding two standard 20mm cups.
+  pads:
+    - type: "circle"
+      name: "left_cup"
+      offset: [-0.045, 0.0, 0.0]  # 45mm to the Left
+      radius: 0.020               # 20mm Radius
+
+    - type: "circle"
+      name: "right_cup"
+      offset: [0.045, 0.0, 0.0]   # 45mm to the Right
+      radius: 0.020               # 20mm Radius
+
+  # --- BODY PARAMETERS ---
+  # Kept from your reference (Schmalz ECG Body)
   body:
-    radius: 0.07575     # D/2 = 151.5mm / 2 = 75.75mm
-    length: 0.0886      # L = 88.6mm
-    
-  # Safety parameters
+    radius: 0.07575       # 75.75mm
+    length: 0.0886        # 88.6mm
+
+  # --- SAFETY PARAMETERS ---
   safety:
-    standoff_distance: 0.05 # 5cm approach distance
+    standoff_distance: 0.05
+    collision_margin: 0.05
+
+# --- SAMPLER CONFIGURATION ---
+# These parameters control how the algorithm behaves for this specific gripper.
+sampler:
+  rotation_strategy: "uniform" # Asymmetric gripper requires rotation
+  rotation_step_deg: 45        # Test every 45 degrees
+  rotation_range_deg: 180      # 0 to 180 covers all cases for bilateral symmetry
+  
+  score_aggregation: "min"     # If one cup hits a hole, score is 0.0

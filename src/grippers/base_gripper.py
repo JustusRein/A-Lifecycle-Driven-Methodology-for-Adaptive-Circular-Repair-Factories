@@ -1,5 +1,9 @@
+import numpy as np
 from abc import ABC, abstractmethod
 from typing import Any, Optional
+import open3d as o3d
+import trimesh
+import copy
 
 # Adjust path to find core modules if necessary, or use relative imports
 # Assuming structure: project/grippers/ and project/core/
@@ -52,3 +56,19 @@ class BaseGripper(ABC):
             GenericGeometry: The 3D model of the gripper.
         """
         pass
+
+    @abstractmethod
+    def generate_safety_collision_mesh(
+        self,
+        contact_point: np.ndarray,
+        surface_normal: np.ndarray,
+        approach_distance: float,
+    ) -> trimesh.Trimesh:
+        """
+        Generates the swept volume (safety tube) for collision checking.
+        """
+        pass
+
+    def visualize(self):
+        assert self.collision_geometry is not None, "Collision geometry not generated."
+        self.collision_geometry.visualize()

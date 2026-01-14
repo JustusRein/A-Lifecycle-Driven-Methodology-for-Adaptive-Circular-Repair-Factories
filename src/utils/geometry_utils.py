@@ -15,9 +15,57 @@ from src.utils.types import (
     DimensionsReport,
 )
 
+
 # ==============================================================================
 # 1. Basic Transformations & Math
 # ==============================================================================
+def create_pose_matrix(
+    rotation_matrix: np.ndarray, translation_vector: np.ndarray
+) -> np.ndarray:
+    """
+    Combines a 3x3 Rotation and 3x1 Translation into a 4x4 Homogeneous Matrix.
+    """
+    T = np.eye(4)
+    T[:3, :3] = rotation_matrix
+    T[:3, 3] = translation_vector
+    return T
+
+
+def generate_z_rotation_fan(
+    base_rotation: np.ndarray, step_deg: int, range_deg: int
+) -> List[np.ndarray]:
+    """
+    Generates a list of rotation matrices by rotating the 'base_rotation'
+    around its own Z-axis in steps.
+
+    Args:
+        base_rotation: Initial 3x3 rotation matrix (usually aligned to normal).
+        step_deg: Step size in degrees.
+        range_deg: Total range (e.g., 180 or 360).
+
+    Returns:
+        List of 3x3 rotation matrices.
+    """
+    rotations = []
+
+    # Avoid infinite loop or zero division
+    if step_deg <= 0:
+        step_deg = 360
+
+    for angle_deg in range(0, range_deg + 1, step_deg):
+        # Create local rotation around Z
+        angle_rad = np.radians(angle_deg)
+        c, s = np.cos(angle_rad), np.sin(angle_rad)
+
+        # Standard 3x3 Z-rotation matrix
+        R_local_z = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+        # Apply local rotation on top of base rotation
+        # R_final = R_base @ R_local
+        R_final = base_rotation @ R_local_z
+        rotations.append(R_final)
+
+    return rotations
 
 
 def create_transformation_matrix(
@@ -110,6 +158,67 @@ def check_normal_alignment(
     angles_deg = np.degrees(np.arccos(np.clip(dot_products, -1.0, 1.0)))
 
     return np.any(angles_deg <= angle_threshold_deg)
+
+
+def get_rotation_matrix_between_vectors(
+    v_from: np.ndarray, v_to: np.ndarray
+) -> np.ndarray:
+    """
+    Calculates the 3x3 rotation matrix that aligns unit vector v_from to v_to.
+    Essential for aligning the Gripper Z-axis to the Surface Normal.
+
+    Args:
+        v_from: Source vector (e.g., [0, 0, 1]).
+        v_to: Target vector (e.g., surface_normal).
+    """
+    v_from = v_from / np.linalg.norm(v_from)
+    v_to = v_to / np.linalg.norm(v_to)
+
+    # Cross product gives the axis of rotation
+    v_cross = np.cross(v_from, v_to)
+    dot = np.dot(v_from, v_to)
+
+    # Handle edge cases (Already parallel or anti-parallel)
+    if np.linalg.norm(v_cross) < 1e-6:
+        # If aligned (dot > 0), return Identity.
+        # If opposite (dot < 0), return 180 deg rotation (flip).
+        return np.eye(3) if dot > 0 else -np.eye(3)
+
+    # Rodrigues Rotation Formula (Skew-symmetric matrix approach)
+    s = np.linalg.norm(v_cross)
+    c = dot
+
+    vx = np.array(
+        [
+            [0, -v_cross[2], v_cross[1]],
+            [v_cross[2], 0, -v_cross[0]],
+            [-v_cross[1], v_cross[0], 0],
+        ]
+    )
+
+    R = np.eye(3) + vx + (vx @ vx) * ((1 - c) / (s**2))
+    return R
+
+
+def apply_transform_to_points(
+    points: np.ndarray, transform_matrix: np.ndarray
+) -> np.ndarray:
+    """
+    Applies a 4x4 transformation matrix to an (N, 3) array of points.
+    Useful for transforming World Points into the Gripper/Pad Frame.
+    """
+    if points.shape[1] != 3:
+        raise ValueError("Points must be (N, 3)")
+
+    # 1. Convert to Homogeneous coordinates (N, 4) -> Add column of 1s
+    ones = np.ones((points.shape[0], 1))
+    points_h = np.hstack([points, ones])
+
+    # 2. Apply Transform: (T @ P.T).T
+    transformed_h = (transform_matrix @ points_h.T).T
+
+    # 3. Drop homogeneous column
+    return transformed_h[:, :3]
 
 
 # ==============================================================================
@@ -711,6 +820,27 @@ def _calculate_report_from_extents(
     )
 
 
+def load_mesh_file(path: str) -> Optional[o3d.geometry.TriangleMesh]:
+    """
+    Safely loads an external 3D asset (.stl, .obj) and ensures it has normals.
+    """
+    try:
+        # Open3D handles format detection automatically
+        mesh = o3d.io.read_triangle_mesh(path)
+
+        if not mesh.has_triangles():
+            print(f"[GeometryUtils] Warning: Loaded mesh '{path}' has no triangles.")
+            return None
+
+        # Critical for good visualization
+        mesh.compute_vertex_normals()
+        return mesh
+
+    except Exception as e:
+        print(f"[GeometryUtils] Error loading mesh '{path}': {e}")
+        return None
+
+
 def merge_meshes(
     meshes: Union[List[trimesh.Trimesh], List[o3d.geometry.TriangleMesh]],
 ) -> Union[trimesh.Trimesh, o3d.geometry.TriangleMesh]:
@@ -735,6 +865,7 @@ def merge_meshes(
         merged = meshes[0]
         for mesh in meshes[1:]:
             merged += mesh
+        merged.compute_vertex_normals()
         return merged
 
     else:

@@ -15,12 +15,21 @@ gripper:
       # 4cm to the left of center
       offset: [-0.04, 0.0, 0.0] 
       radius: 0.020 # 20mm raio
+      length: 0.025 # 5mm de comprimento
 
     - type: "circle"
       name: "right_cup"
       # 4cm to the right of center
       offset: [0.04, 0.0, 0.0]
       radius: 0.020
+      length: 0.025 # 5mm de comprimento
+
+    - type: "rect"
+      name: "middle_pad"
+      offset: [0.0, 0.0, 0.0]
+      width: 0.02   # 2cm de largura
+      height: 0.04  # 4cm de altura
+      length: 0.025  # 1cm de comprimento
 
   # --- BODY CONFIG ---
   # The main gripper body that holds the suction cups

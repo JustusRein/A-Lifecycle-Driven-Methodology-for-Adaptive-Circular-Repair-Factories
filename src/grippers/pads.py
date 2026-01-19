@@ -81,10 +81,12 @@ class CircularPad(BaseSuctionPad):
     """
 
     radius: float
+    length: float
 
-    def __init__(self, name: str, offset: np.ndarray, radius: float):
+    def __init__(self, name: str, offset: np.ndarray, radius: float, length: float):
         super().__init__(name, offset)
         self.radius = radius
+        self.length = length
 
     def is_point_inside(self, local_points_xy: np.ndarray) -> np.ndarray:
         # Math: x^2 + y^2 <= r^2
@@ -92,8 +94,9 @@ class CircularPad(BaseSuctionPad):
         return dists <= self.radius
 
     def get_collision_mesh(self) -> trimesh.Trimesh:
-        mesh = trimesh.creation.cylinder(radius=self.radius, height=0.05)
+        mesh = trimesh.creation.cylinder(radius=self.radius, height=self.length)
         mesh.apply_translation(self.offset)
+        mesh.apply_translation([0, 0, -self.length / 2.0])  # Center at base
         return mesh
 
     @property
@@ -109,11 +112,15 @@ class RectangularPad(BaseSuctionPad):
 
     width: float
     height: float
+    length: float
 
-    def __init__(self, name: str, offset: np.ndarray, width: float, height: float):
+    def __init__(
+        self, name: str, offset: np.ndarray, width: float, height: float, length: float
+    ):
         super().__init__(name, offset)
         self.width = width
         self.height = height
+        self.length = length
 
     def is_point_inside(self, local_points_xy: np.ndarray) -> np.ndarray:
         # Math: |x| <= w/2 AND |y| <= h/2
@@ -122,8 +129,9 @@ class RectangularPad(BaseSuctionPad):
         return (x <= self.width / 2.0) & (y <= self.height / 2.0)
 
     def get_collision_mesh(self) -> trimesh.Trimesh:
-        mesh = trimesh.creation.box(extents=[self.width, self.height, 0.05])
+        mesh = trimesh.creation.box(extents=[self.width, self.height, self.length])
         mesh.apply_translation(self.offset)
+        mesh.apply_translation([0, 0, -self.length / 2.0])
         return mesh
 
     @property

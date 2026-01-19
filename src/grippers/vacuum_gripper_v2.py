@@ -32,6 +32,7 @@ class VacuumGripperConfig:
     standoff_distance: float = 0.05
     collision_margin: float = 0.05
     name: str = "UnknownVacuum"
+    grasp_strategy: str = "single_aligned"
 
 
 class VacuumGripper(BaseGripper):
@@ -93,6 +94,7 @@ class VacuumGripper(BaseGripper):
             body_length=float(body.get("length", 0.088)),
             standoff_distance=float(safety.get("standoff_distance", 0.05)),
             collision_margin=float(safety.get("collision_margin", 0.05)),
+            grasp_strategy=data.get("grasp_strategy", "single_aligned"),
         )
 
     def _parse_pads_list(self, data: Dict[str, Any]) -> List[BaseSuctionPad]:
@@ -115,6 +117,7 @@ class VacuumGripper(BaseGripper):
             name="center_cup",
             offset=np.array([0, 0, 0]),
             radius=float(cup_data.get("radius", 0.02)),
+            length=float(cup_data.get("length", 0.03)),
         )
 
     # =========================================================================
@@ -165,7 +168,7 @@ class VacuumGripper(BaseGripper):
         return gu.create_cylinder(
             radius=self.config.body_radius,
             length=self.config.body_length,
-            start_point=np.array([0, 0, 0.03]),  # Offset slightly above pads
+            start_point=np.array([0, 0, 0.0]),  # Offset slightly above pads
             direction_vector=np.array([0, 0, 1]),
             color=BODY_COLOR,
             backend="open3d",

@@ -7,6 +7,7 @@ from typing import List, Optional, TypedDict, Dict, Literal
 
 from src.grasping.base_sampler import BaseGraspSampler, GraspCandidate
 from src.grippers.vacuum_gripper_v2 import VacuumGripper
+from src.grasping.strategies import STRATEGY_REGISTRY
 import src.utils.geometry_utils as gu
 
 # --- Types & Config ---
@@ -76,6 +77,21 @@ class VacuumGraspSampler(
     Sampler logic for Vacuum Grippers (Single or Multi-Pad).
     Decouples Point Discovery (Raycasting) from Orientation Generation (Strategy).
     """
+
+    def __init__(self, gripper: VacuumGripper, config: VacuumSamplerConfig):
+        super().__init__(gripper, config)
+
+        strategy_name = self.gripper.config.grasp_strategy
+        if strategy_name not in STRATEGY_REGISTRY:
+            print(
+                f"[Warning] Strategy '{strategy_name}' not found. Fallback to 'projection'."
+            )
+            raise ValueError(
+                f"Unknown strategy: {strategy_name}. Available: {list(STRATEGY_REGISTRY.keys())}"
+            )
+
+        self.strategy = STRATEGY_REGISTRY[strategy_name]()
+        print(f"[VacuumSampler] Using Contact Strategy: {strategy_name}")
 
     def sample_grasps(
         self, pcd: o3d.geometry.PointCloud
@@ -282,33 +298,47 @@ class VacuumGraspSampler(
     def _evaluate_single_candidate(
         self, cand, pcd_tree, all_points, com_xy, max_torque_arm
     ):
-        # 1. Verticality (Robot Pose)
+        """
+        Evaluates a single grasp candidate by combining geometric contact resolution
+        (Strategy) with physical stability checks (GSS).
+        """
+        # 1. Verticality Check (Alignment with Gravity/Z-axis)
         s_vert, angle_deg = self._calculate_verticality(cand)
         if s_vert == 0.0:
             self._mark_candidate_failed(cand, "bad_angle")
             return
 
-        # 2. Torque (Global Stability)
+        # 2. Torque Check (Global Stability / Distance to CoM)
         s_torque = self._calculate_torque(cand, com_xy, max_torque_arm)
 
-        # 3. Multi-Pad Flatness (Local Sealing)
-        s_flat, pad_scores_dict = self._evaluate_pads_flatness(
-            cand, pcd_tree, all_points
+        # 3. CONTACT RESOLUTION (Delegated to Strategy)
+        # The Strategy determines WHERE each pad touches the surface based on the
+        # specific geometric approach (e.g., rigid projection, physical adjustment).
+        contact_points = self.strategy.resolve_contacts(
+            cand.transform, self.gripper.config.pads, pcd_tree, all_points
         )
 
+        # 4. Multi-Pad Flatness & Sealing Check (Physical Evaluation)
+        # We pass the already resolved contact points to the physics evaluator.
+        s_flat, pad_scores_dict = self._evaluate_pads_flatness(
+            cand, contact_points, pcd_tree, all_points
+        )
+
+        # If sealing fails (e.g., gap too large), the grasp is invalid.
         if s_flat <= 0.0:
             self._mark_candidate_failed(cand, "bad_seal")
-            # Store partial details for debug even if failed
+            # Store partial details for debugging purposes
             cand.score_details["pad_scores"] = pad_scores_dict
             return
 
-        # 4. Final Weighted Score
+        # 5. Final Weighted Score Calculation
         score = (
             (self.config.weight_flatness * s_flat)
             + (self.config.weight_verticality * s_vert)
             + (self.config.weight_torque * s_torque)
         )
 
+        # Update Candidate Data
         cand.score = score
         cand.score_details = VacuumScoreDetails(
             flatness=s_flat,
@@ -316,64 +346,85 @@ class VacuumGraspSampler(
             torque=s_torque,
             raw_angle_deg=angle_deg,
             pad_scores=pad_scores_dict,
+            failure_reason=None,
         )
 
-    def _evaluate_pads_flatness(self, cand, pcd_tree, all_points):
+    def _evaluate_pads_flatness(self, cand, contact_points, pcd_tree, all_points):
         """
-        Iterates over all pads, projects them to surface, checks gaps, and calculates flatness.
+        Calculates the physical score (Gap & Curvature) for the provided contact points.
+
+        Logic:
+        - It does NOT perform projection or raycasting (this is done by the Strategy).
+        - It verifies if the resolved contact points are physically valid (e.g., small gap).
+        - It measures local curvature at the contact points to ensure a good seal.
+
+        Args:
+            cand: The grasp candidate (pose).
+            contact_points: List of [x,y,z] points where pads touch the surface.
+            pcd_tree: KDTree for radius search (curvature calculation).
+            all_points: Point cloud data.
+
+        Returns:
+            aggregated_flatness (float): Combined score of all pads.
+            pad_details (dict): Individual scores for debugging.
         """
         pad_scores = []
         pad_details = {}
 
-        # Extract Candidate Rotation (3x3)
+        # Extract Candidate Rotation matrix (3x3) and Translation (TCP)
+        # Required to calculate the theoretical 'rigid' position of the pads.
         R_cand = cand.transform[:3, :3]
         TCP_pos = cand.contact_point
 
-        for pad in self.gripper.config.pads:
-            # A. Transform Pad Offset to World Frame
-            # P_world = TCP + (R * Offset_local)
+        # Iterate over pads and their corresponding resolved contact points
+        for i, pad in enumerate(self.gripper.config.pads):
+            # The actual surface point where this pad makes contact (from Strategy)
+            nearest_pt = contact_points[i]
+
+            # Calculate the theoretical rigid position (where the pad would be if floating)
+            # Formula: P_rigid = TCP + (Rotation * Offset)
             world_pad_pos = TCP_pos + (R_cand @ pad.offset)
 
-            # B. Find Nearest Point on Surface
-            [k, idx, _] = pcd_tree.search_knn_vector_3d(world_pad_pos, 1)
-            nearest_pt = all_points[idx[0]]
-
-            # C. Gap Check (Critical for Multi-Pad)
+            # --- A. Gap Check (Physical Constraint) ---
+            # Measure the distance between the rigid pad position and the actual surface.
+            # If the surface is too far away, the suction cup cannot bridge the gap.
             gap = np.linalg.norm(world_pad_pos - nearest_pt)
+
             if gap > self.config.max_pad_gap:
-                # Pad is floating in air -> Fail
+                # Pad is floating too far from surface -> Fail
                 pad_scores.append(0.0)
                 pad_details[pad.name] = 0.0
                 continue
 
-            # D. Local Curvature Calculation
-            # Heuristic: 1.5x the safety radius of the specific pad
+            # --- B. Local Curvature Calculation (Sealing Quality) ---
+            # Search for neighbors around the contact point to estimate flatness.
             search_radius = pad.safety_radius * 1.5
-
             [k, idx_neighbors, _] = pcd_tree.search_radius_vector_3d(
                 nearest_pt, search_radius
             )
 
             if k < 5:
-                # Edge/Noise -> Fail
+                # Not enough points (e.g., edge of object or noise) -> Fail
                 pad_scores.append(0.0)
                 pad_details[pad.name] = 0.0
                 continue
 
-            # PCA for Curvature
+            # Compute eigenvalues of covariance matrix to estimate curvature
             neighbors = all_points[idx_neighbors, :]
             cov = np.cov(neighbors, rowvar=False)
             eigs = np.linalg.eigvalsh(cov)
+
+            # Curvature metric: ratio of the smallest eigenvalue (surface variation)
             curvature = eigs[0] / (np.sum(eigs) + 1e-12)
 
-            # Score 0.0 (Curved) to 1.0 (Flat)
+            # Map curvature to a 0.0 - 1.0 score
             s_pad = 1.0 - (curvature / self.config.max_curvature)
             s_pad = np.clip(s_pad, 0.0, 1.0)
 
             pad_scores.append(s_pad)
             pad_details[pad.name] = s_pad
 
-        # Aggregation
+        # Aggregate individual pad scores into a single metric (e.g., min, mean)
         aggregated_flatness = self._aggregate_pad_scores(pad_scores)
 
         return aggregated_flatness, pad_details

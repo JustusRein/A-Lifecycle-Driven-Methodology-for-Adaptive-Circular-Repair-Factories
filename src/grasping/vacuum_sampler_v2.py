@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import List, Optional, TypedDict, Dict, Literal
 
 from src.grasping.base_sampler import BaseGraspSampler, GraspCandidate
-from src.grippers.vacuum_gripper import VacuumGripper
+from src.grippers.vacuum_gripper_v2 import VacuumGripper
 import src.utils.geometry_utils as gu
 
 # --- Types & Config ---

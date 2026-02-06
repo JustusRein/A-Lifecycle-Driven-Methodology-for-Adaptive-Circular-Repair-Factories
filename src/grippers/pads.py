@@ -13,7 +13,7 @@ class BaseSuctionPad(abc.ABC):
     without modifying the main Gripper code.
     """
 
-    def __init__(self, name: str, offset: np.ndarray):
+    def __init__(self, name: str, offset: np.ndarray, lenght: float = 0.0):
         """
         Args:
             name: Identifier for debugging (e.g., "left_cup").
@@ -21,6 +21,7 @@ class BaseSuctionPad(abc.ABC):
         """
         self.name = name
         self.offset = np.array(offset, dtype=np.float64)
+        self.length = lenght
 
     @abc.abstractmethod
     def is_point_inside(self, local_points_xy: np.ndarray) -> np.ndarray:
@@ -46,6 +47,14 @@ class BaseSuctionPad(abc.ABC):
         """
         Returns the effective radius for safety volume calculations.
         Allows the Gripper to calculate approach tubes without knowing the exact shape.
+        """
+        pass
+
+    @abc.abstractmethod
+    def get_safety_mesh(self, margin_scale: float) -> trimesh.Trimesh:
+        """
+        Returns the collision mesh inflated by the safety margin.
+        Used for static collision checking near the object surface.
         """
         pass
 
@@ -103,6 +112,19 @@ class CircularPad(BaseSuctionPad):
     def safety_radius(self) -> float:
         return self.radius
 
+    def get_safety_mesh(self, margin_scale: float) -> trimesh.Trimesh:
+        # Apenas infla o raio. A altura (length) mantemos original para não
+        # criar colisão fantasma com o objeto.
+        safe_radius = self.radius * margin_scale
+
+        mesh = trimesh.creation.cylinder(radius=safe_radius, height=self.length)
+
+        # Centraliza e aplica offset local (mesma lógica do collision normal)
+        # Cilindro nasce no centro (0,0,0). Movemos para base (-length/2) e aplicamos offset.
+        mesh.apply_translation([0, 0, -self.length / 2.0])
+        mesh.apply_translation(self.offset)
+        return mesh
+
 
 @dataclass
 class RectangularPad(BaseSuctionPad):
@@ -132,6 +154,17 @@ class RectangularPad(BaseSuctionPad):
         mesh = trimesh.creation.box(extents=[self.width, self.height, self.length])
         mesh.apply_translation(self.offset)
         mesh.apply_translation([0, 0, -self.length / 2.0])
+        return mesh
+
+    def get_safety_mesh(self, margin_scale: float) -> trimesh.Trimesh:
+        safe_w = self.width * margin_scale
+        safe_h = self.height * margin_scale
+
+        mesh = trimesh.creation.box(extents=[safe_w, safe_h, self.length])
+
+        # Ajusta posição
+        mesh.apply_translation([0, 0, -self.length / 2.0])
+        mesh.apply_translation(self.offset)
         return mesh
 
     @property

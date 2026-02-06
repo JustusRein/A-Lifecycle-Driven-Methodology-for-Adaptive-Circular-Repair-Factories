@@ -1,7 +1,8 @@
 import abc
 import numpy as np
 import open3d as o3d
-from typing import List, Dict, Type
+from typing import List, Tuple, Dict, Type
+from copy import deepcopy
 
 # Import BaseSuctionPad for type hinting
 from src.grippers.pads import BaseSuctionPad
@@ -14,9 +15,6 @@ class GraspContactStrategy(abc.ABC):
     Responsibility:
     Receives a candidate Pose (TCP + Rotation) and determines WHERE
     each suction pad would touch the object's surface.
-
-    This decouples the geometric logic (Projection, Physical Adjustment, etc.)
-    from the physical evaluation logic (GSS / Vacuum Score).
     """
 
     @abc.abstractmethod
@@ -26,20 +24,23 @@ class GraspContactStrategy(abc.ABC):
         pads: List[BaseSuctionPad],
         pcd_tree: o3d.geometry.KDTreeFlann,
         all_points: np.ndarray,
-    ) -> List[np.ndarray]:
+        max_pad_gap: float = 0.005,
+    ) -> Tuple[List[np.ndarray], np.ndarray]:
         """
         Calculates the actual contact points on the surface for each pad.
 
         Args:
             tcp_pose: 4x4 homogeneous transformation matrix of the TCP.
-            pads: List of Pad objects (containing their offsets).
-            pcd_tree: KDTree of the point cloud for fast spatial searches.
-            all_points: (N, 3) array containing the coordinates of the cloud points.
+            pads: List of Pad objects.
+            pcd_tree: KDTree of the point cloud.
+            all_points: (N, 3) array of cloud points.
+            max_pad_gap: Maximum allowed gap (unused in Projection strategy,
+                         but kept for interface consistency).
 
         Returns:
-            List[np.ndarray]: A list of (x, y, z) points on the surface where each pad
-                              would theoretically make contact. The order corresponds
-                              to the input 'pads' list.
+            Tuple containing:
+            1. List[np.ndarray]: A list of (x, y, z) contact points.
+            2. np.ndarray: The TCP pose (unchanged in Projection strategy).
         """
         pass
 
@@ -47,11 +48,7 @@ class GraspContactStrategy(abc.ABC):
 class SinglePadStrategy(GraspContactStrategy):
     """
     Strategy for Single Suction Cup Grippers.
-
-    Logic:
-    The contact point is simply the TCP translation itself.
-    There is no need for complex projection because the TCP is already
-    positioned at the test point on the surface.
+    Contact is simply the TCP origin.
     """
 
     def resolve_contacts(
@@ -60,27 +57,23 @@ class SinglePadStrategy(GraspContactStrategy):
         pads: List[BaseSuctionPad],
         pcd_tree: o3d.geometry.KDTreeFlann,
         all_points: np.ndarray,
-    ) -> List[np.ndarray]:
-        # The contact is the TCP origin itself (column 3 of the transformation matrix)
+        max_pad_gap: float = 0.005,
+    ) -> Tuple[List[np.ndarray], np.ndarray]:
+        # The contact is the TCP origin itself
         tcp_origin = tcp_pose[:3, 3]
 
-        # Returns a list containing the single contact point
-        return [tcp_origin]
+        # Returns: [Contact Points], Original Pose
+        return [tcp_origin], tcp_pose
 
 
 class MultiPadProjectionStrategy(GraspContactStrategy):
     """
     Projection Strategy (Justus' Idea 2).
-    Recommended for rigid Multi-Pad Grippers.
 
     Logic:
-    1. Keeps the gripper 'frozen' at the candidate pose.
-    2. Calculates the theoretical rigid position of each cup in the world
-       (using the fixed offset).
-    3. Projects this position onto the object's surface (Nearest Neighbor).
-
-    This allows measuring the 'gap' (error) of each cup individually
-    without physically moving the robot simulation.
+    1. Keeps the gripper rigid at the candidate pose.
+    2. Calculates the theoretical world position of each pad.
+    3. Finds the nearest neighbor on the surface for each pad.
     """
 
     def resolve_contacts(
@@ -89,35 +82,29 @@ class MultiPadProjectionStrategy(GraspContactStrategy):
         pads: List[BaseSuctionPad],
         pcd_tree: o3d.geometry.KDTreeFlann,
         all_points: np.ndarray,
-    ) -> List[np.ndarray]:
+        max_pad_gap: float = 0.005,
+    ) -> Tuple[List[np.ndarray], np.ndarray]:
         contact_points = []
-
-        # Extract Rotation (R) and Translation (t) from the TCP Pose
         R_tcp = tcp_pose[:3, :3]
         t_tcp = tcp_pose[:3, 3]
 
         for pad in pads:
-            # 1. Rigid World Position (Where the cup is 'floating' in space)
-            # Formula: P_world = TCP_pos + (R_tcp @ Pad_offset)
+            # 1. Rigid World Position
             pad_world_pos = t_tcp + (R_tcp @ pad.offset)
 
-            # 2. Projection onto Surface (Nearest Neighbor Search)
-            # Finds the single nearest neighbor in the point cloud
+            # 2. Projection onto Surface (Nearest Neighbor)
             [k, idx, _] = pcd_tree.search_knn_vector_3d(pad_world_pos, 1)
-
-            # Retrieve the actual coordinate of the point in the cloud
-            # idx[0] is the index of the nearest point
             nearest_surface_point = all_points[idx[0]]
 
             contact_points.append(nearest_surface_point)
 
-        return contact_points
+        # Returns: [Projected Points], Original Pose (Unchanged)
+        return contact_points, tcp_pose
 
 
-# --- Strategy Registry/Factory ---
+# --- Strategy Registry ---
 
 STRATEGY_REGISTRY: Dict[str, Type[GraspContactStrategy]] = {
     "single": SinglePadStrategy,
     "projection": MultiPadProjectionStrategy,
-    # Future strategies (e.g., "physical_adjust") can be added here
 }

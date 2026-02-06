@@ -10,13 +10,10 @@ gripper:
   pads:
     - type: "circle"
       name: "left_cup"
-      offset: [-0.045, 0.0, 0.0]  # 45mm to the Left
-      radius: 0.020               # 20mm Radius
+      offset: [0.0, 0.0, 0.0]  # 45mm to the Left
+      radius: 0.010               # 20mm Radius
+      length: 0.05                # 5mm Length
 
-    - type: "circle"
-      name: "right_cup"
-      offset: [0.045, 0.0, 0.0]   # 45mm to the Right
-      radius: 0.020               # 20mm Radius
 
   # --- BODY PARAMETERS ---
   # Kept from your reference (Schmalz ECG Body)

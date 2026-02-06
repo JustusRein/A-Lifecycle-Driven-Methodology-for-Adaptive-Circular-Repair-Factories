@@ -1,3 +1,4 @@
+
 gripper:
   name: "Double_Schmalz_ECG"
   
@@ -14,23 +15,10 @@ gripper:
     - type: "circle"
       name: "left_cup"
       # 4cm to the left of center
-      offset: [-0.04, 0.0, 0.0] 
-      radius: 0.015 # 20mm raio
+      offset: [0.0, 0.0, 0.0] 
+      radius: 0.030 # 20mm raio
       # length: 0.05 # 5mm de comprimento
-
-    - type: "circle"
-      name: "right_cup"
-      # 4cm to the right of center
-      offset: [0.04, 0.0, 0.0]
-      radius: 0.015
-      # length: 0.05 # 5mm de comprimento
-
-    # - type: "rect"
-    #   name: "middle_pad"
-    #   offset: [0.0, 0.0, 0.0]
-    #   width: 0.03   # 2cm de largura
-    #   height: 0.03  # 4cm de altura
-    #   # length: 0.05  # 5mm de comprimento
+    #
 
   # --- BODY CONFIG ---
   # The main gripper body that holds the suction cups
@@ -42,4 +30,4 @@ gripper:
   safety:
     standoff_distance: 0.05 # Distância de aproximação (Pre-grasp)
     collision_margin: 0.05  # Margem extra de 5% nas colisões
-  grasp_strategy: 'projection'
+  grasp_strategy: 'single'

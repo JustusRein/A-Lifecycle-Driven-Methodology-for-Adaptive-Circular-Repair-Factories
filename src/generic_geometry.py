@@ -537,3 +537,37 @@ class GenericGeometry:
 
     def get_dimensions_report(self) -> DimensionsReport:
         return gu.analyze_object_dimensions(self.geometry)
+
+    def clean_point_cloud(self, nb_neighbors: int = 20, std_ratio: float = 2.0):
+        """
+        Applies statistical cleaning and ensures normal consistency.
+
+        Args:
+            nb_neighbors (int): Number of neighbors to analyze for noise stats.
+            std_ratio (float): Threshold. Lower is more aggressive.
+        """
+        self.to_point_cloud(inplace=True)
+        print(f"[Clean] Points before cleaning: {len(self.geometry.points)}")
+
+        # 1. Statistical Outlier Removal
+        # Removes "flying pixels" and sparse noise (dust) around the object.
+        # It does NOT remove valid geometry like the back of the can.
+        pcd_clean, ind = self.geometry.remove_statistical_outlier(
+            nb_neighbors=nb_neighbors, std_ratio=std_ratio
+        )
+        self.geometry = pcd_clean
+
+        # 2. Re-estimate Normals
+        # Necessary because removing points invalidates the old KDTree/Normals.
+        # Uses a Hybrid search (Radius + KNN) for robustness.
+        self.geometry.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.01, max_nn=30)
+        )
+
+        # 3. Consistent Normal Orientation
+        # Instead of aligning to a camera (which flips the back), this method
+        # propagates normal direction through the neighbor graph.
+        # Result: All normals point OUTWARDS, regardless of where the camera was.
+        self.geometry.orient_normals_consistent_tangent_plane(k=15)
+
+        print(f"[Clean] Points after cleaning: {len(self.geometry.points)}")

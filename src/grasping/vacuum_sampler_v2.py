@@ -18,7 +18,7 @@ class VacuumScoreDetails(TypedDict):
     Detailed breakdown of the grasp score for debugging.
     """
 
-    flatness: float  # Aggregated flatness score
+    seal_score: float  # Aggregated seal score (coverage of contact zones)
     verticality: float  # Alignment with gravity/Z
     torque: float  # Stability score (distance to CoM)
     raw_angle_deg: float  # The actual angle deviation
@@ -56,10 +56,10 @@ class VacuumSamplerConfig:
 
     # Maximum allowed gap between a pad and the surface (meters).
     # If a pad is floating more than this value, the grasp is invalid.
-    max_pad_gap: float = 0.01
+    # max_pad_gap: float = 0.01
 
     # --- Weights ---
-    weight_flatness: float = 0.40
+    weight_seal: float = 0.40
     weight_verticality: float = 0.30
     weight_torque: float = 0.30
 
@@ -343,12 +343,12 @@ class VacuumGraspSampler(
         cand.transform = adjusted_pose
         cand.contact_point = adjusted_pose[:3, 3]
 
-        # 4. Multi-Pad Physical Evaluation
-        s_flat, pad_scores_dict = self._evaluate_pads_flatness(
+        # 4. Multi-Pad Physical Evaluation (Seal)
+        s_seal, pad_scores_dict = self._evaluate_suction_seal(
             cand, contact_points, pcd_tree, all_points, all_normals
         )
 
-        if s_flat <= 0.0:
+        if s_seal <= 0.0:
             is_failed = True
             fail_reasons.append("bad_seal")
             if not self.config.debug_score:
@@ -358,7 +358,7 @@ class VacuumGraspSampler(
 
         # 5. Final Score Calculation
         weighted_score = (
-            (self.config.weight_flatness * s_flat)
+            (self.config.weight_seal * s_seal)
             + (self.config.weight_verticality * s_vert)
             + (self.config.weight_torque * s_torque)
         )
@@ -366,7 +366,7 @@ class VacuumGraspSampler(
         cand.score = 0.0 if is_failed else weighted_score
 
         cand.score_details = VacuumScoreDetails(
-            flatness=s_flat,
+            seal_score=s_seal,
             verticality=s_vert,
             torque=s_torque,
             raw_angle_deg=angle_deg,
@@ -374,22 +374,18 @@ class VacuumGraspSampler(
             failure_reason=fail_reasons,  # Now passing the list directly
         )
 
-    def _evaluate_pads_flatness(
+    def _evaluate_suction_seal(
         self, cand, contact_points, pcd_tree, all_points, all_normals
     ):
         """
-        Calculates physical scores: Gap, Normal Alignment, Curvature, and Aspect Ratio.
+        Calculates the Seal Score based on Zone Coverage.
+        Transforms points into the pad's local frame to check coverage against defined zones.
         """
         pad_scores = []
         pad_details = {}
 
         R_cand = cand.transform[:3, :3]
         TCP_pos = cand.contact_point
-
-        gripper_body_z = R_cand[:, 2]  # Z-axis points OUT of the object
-        # Vector 2: Suction Direction (Points INTO the object)
-        # This is the vector that should oppose the surface normal.
-        gripper_look_dir = -gripper_body_z
 
         for i, pad in enumerate(self.gripper.config.pads):
             nearest_pt = contact_points[i]
@@ -399,160 +395,68 @@ class VacuumGraspSampler(
             world_pad_pos = TCP_pos + (R_cand @ pad.offset)
             gap = np.linalg.norm(world_pad_pos - nearest_pt)
 
-            if gap > self.config.max_pad_gap:
+            if gap > pad.max_sealing_distance:
                 pad_scores.append(0.0)
                 pad_details[pad.name] = 0.0
                 continue
 
-            # --- B. Normal Alignment Check (Robust Ray-Trust Logic) ---
+            # --- B. Zone Coverage Analysis ---
 
-            # 1. Retrieve the raw normal from the point cloud (might be flipped/inconsistent)
-            [_, idx_check, _] = pcd_tree.search_knn_vector_3d(nearest_pt, 1)
-            raw_surface_normal = all_normals[idx_check[0]]
-
-            # 2. "Ray-Trust" Consistency Check:
-            # The gripper body ALWAYS points OUT (defined by the raycast origin).
-            # If the raw cloud normal points roughly in the same direction, it is correct (OUT).
-            # If it points in the opposite direction, the cloud normal is flipped (IN).
-            consistency = np.dot(raw_surface_normal, gripper_body_z)
-
-            effective_normal = raw_surface_normal
-
-            # If dot product is negative, they are opposing.
-            # It means the cloud normal is pointing IN (wrong). We flip it for calculation.
-            if consistency < 0:
-                effective_normal = -raw_surface_normal
-
-            # 3. Calculate Actual Alignment
-            # The Surface Normal (OUT) and Gripper Look Dir (IN) must be antiparallel.
-            # Ideal Dot Product: -1.0
-            alignment = np.dot(effective_normal, gripper_look_dir)
-
-            # Threshold:
-            # -0.5 corresponds to approx 60 degrees tolerance.
-            # (Previously -0.2 was ~78 degrees, which is too permissive for suction).
-            if alignment > -0.5:
-                pad_scores.append(0.0)
-                pad_details[pad.name] = 0.0
-                continue
-
-            # --- C. Local Surface Analysis ---
-            # Adjusted search radius to 1.0x to avoid picking up inner walls of thin objects (e.g., cans).
-            search_radius = pad.radius * 1.0
-
+            # 1. Gather points around the contact
+            # Use a slightly larger radius (1.2x) to ensure we capture the rim points
+            search_radius = pad.safety_radius * 1.2
             [k, idx_neighbors, _] = pcd_tree.search_radius_vector_3d(
                 nearest_pt, search_radius
             )
 
-            # Not enough neighbors to calculate covariance
             if k < 5:
                 pad_scores.append(0.0)
                 pad_details[pad.name] = 0.0
                 continue
 
             neighbors = all_points[idx_neighbors, :]
+            ref_area = np.pi * (search_radius**2)
+            local_density_ref = k / ref_area  # Ex: 50.000 pts/m²
+            # 2. Transform points to Pad Local Frame
+            # P_local = (P_world - Pad_Center_World) @ R_cand
+            # This aligns the pad's normal (Z) with the world Z, allowing 2D projection.
+            local_points_3d = (neighbors - world_pad_pos) @ R_cand
+            filtered_local_points = local_points_3d[
+                np.abs(local_points_3d[:, 2]) >= pad.max_sealing_distance
+            ]
 
-            # Compute Covariance and Eigenvalues
-            # Note: Covariance is direction-agnostic, so flipped normals don't affect curvature.
-            cov = np.cov(neighbors, rowvar=False)
-            eigs = np.linalg.eigvalsh(cov)
+            # 3. Calculate Coverage
+            zones_dict = pad.split_points_in_zones(filtered_local_points)
+            # covered_zones = len(zones_dict)
+            zones_areas = pad.zone_areas
+            zone_scores = []
 
-            sum_eigs = np.sum(eigs) + 1e-12
-            max_eig = eigs[2] + 1e-12
+            for zone_name, pts in zones_dict.items():
+                target_area = zones_areas.get(zone_name, 0.0)
+                expected_count = (local_density_ref * target_area) * 4
+                valid_count = len(pts)
+                if valid_count == 0:
+                    zone_scores.append(0.0)
+                    continue
 
-            # 1. Curvature Score (Flatness)
-            # Low smallest eigenvalue = Flat surface
-            curvature = eigs[0] / sum_eigs
-            s_curv = 1.0 - (curvature / self.config.max_curvature)
-            s_curv = np.clip(s_curv, 0.0, 1.0)
+                # Score = Real / Esperado
+                # Clamp em 1.0 (não ganha bonus por ter pontos demais)
+                ratio = valid_count / expected_count
+                score = np.clip(ratio, 0, 1.0)
 
-            # 2. Aspect Ratio Score (Shape Regularity)
-            # Checks if the surface is roughly circular/square (good) or elongated/edge (bad).
-            aspect_ratio = eigs[1] / max_eig
-            min_aspect_ratio = 0.5
-
-            if aspect_ratio < min_aspect_ratio:
-                s_shape = 0.0
+                zone_scores.append(valid_count)
+            max_count = max(zone_scores)
+            if max_count > 0:
+                zone_scores = [s / max_count for s in zone_scores]
             else:
-                s_shape = (aspect_ratio - min_aspect_ratio) / (1.0 - min_aspect_ratio)
-                s_shape = np.clip(s_shape, 0.0, 1.0)
+                zone_scores = [0.0 for s in zone_scores]
+            pad_scores.append(min(zone_scores))
+            pad_details[pad.name] = zone_scores
 
-            final_pad_score = s_curv * s_shape
-            pad_scores.append(final_pad_score)
-            pad_details[pad.name] = final_pad_score
+        # aggregated_seal = self._aggregate_pad_scores(pad_scores )
+        aggregated_seal = np.mean(pad_scores)
 
-        aggregated_flatness = self._aggregate_pad_scores(pad_scores)
-
-        return aggregated_flatness, pad_details
-        # #        ---------------------------------------
-        # for i, pad in enumerate(self.gripper.config.pads):
-        #     nearest_pt = contact_points[i]
-        #
-        #     # --- A. Gap Check ---
-        #     world_pad_pos = TCP_pos + (R_cand @ pad.offset)
-        #     gap = np.linalg.norm(world_pad_pos - nearest_pt)
-        #
-        #     if gap > self.config.max_pad_gap:
-        #         pad_scores.append(0.0)
-        #         pad_details[pad.name] = 0.0
-        #         continue
-        #
-        #     # --- B. Normal Alignment Check (Justus' Req: n . g < 0) ---
-        #     # Get the normal of the contact point
-        #     [_, idx_check, _] = pcd_tree.search_knn_vector_3d(nearest_pt, 1)
-        #     surface_normal = all_normals[idx_check[0]]
-        #
-        #     # Dot product: -1.0 (Opposite/Good), 1.0 (Same/Bad)
-        #     alignment = np.dot(surface_normal, gripper_look_dir)
-        #
-        #     # Threshold: Surface must roughly face the gripper
-        #     # -0.2 is approx 78 degrees tolerance
-        #     if alignment > -0.2:
-        #         pad_scores.append(0.0)
-        #         pad_details[pad.name] = 0.0
-        #         continue
-        #
-        #     # --- C. Local Surface Analysis ---
-        #     search_radius = pad.safety_radius * 1.5
-        #     [k, idx_neighbors, _] = pcd_tree.search_radius_vector_3d(
-        #         nearest_pt, search_radius
-        #     )
-        #
-        #     if k < 5:
-        #         pad_scores.append(0.0)
-        #         pad_details[pad.name] = 0.0
-        #         continue
-        #
-        #     neighbors = all_points[idx_neighbors, :]
-        #     cov = np.cov(neighbors, rowvar=False)
-        #     eigs = np.linalg.eigvalsh(cov)
-        #
-        #     sum_eigs = np.sum(eigs) + 1e-12
-        #     max_eig = eigs[2] + 1e-12
-        #
-        #     # 1. Curvature Score (Flatness)
-        #     curvature = eigs[0] / sum_eigs
-        #     s_curv = 1.0 - (curvature / self.config.max_curvature)
-        #     s_curv = np.clip(s_curv, 0.0, 1.0)
-        #
-        #     # 2. Aspect Ratio Score (Avoid Spikes)
-        #     aspect_ratio = eigs[1] / max_eig
-        #     min_aspect_ratio = 0.2
-        #
-        #     if aspect_ratio < min_aspect_ratio:
-        #         s_shape = 0.0
-        #     else:
-        #         s_shape = (aspect_ratio - min_aspect_ratio) / (1.0 - min_aspect_ratio)
-        #         s_shape = np.clip(s_shape, 0.0, 1.0)
-        #
-        #     final_pad_score = s_curv * s_shape
-        #     pad_scores.append(final_pad_score)
-        #     pad_details[pad.name] = final_pad_score
-        #
-        # aggregated_flatness = self._aggregate_pad_scores(pad_scores)
-        #
-        # return aggregated_flatness, pad_details
-        #
+        return aggregated_seal, pad_details
 
     def _aggregate_pad_scores(self, scores: List[float]) -> float:
         """
@@ -611,7 +515,7 @@ class VacuumGraspSampler(
     @staticmethod
     def _make_empty_score_details() -> VacuumScoreDetails:
         return VacuumScoreDetails(
-            flatness=0.0,
+            seal_score=0.0,
             verticality=0.0,
             torque=0.0,
             raw_angle_deg=0.0,
@@ -702,52 +606,6 @@ class VacuumGraspSampler(
             geometries, window_name=f"Grasp Visualization - Score: {grasp.score:.3f}"
         )
 
-    # def visualize_grasp(
-    #     self,
-    #     pcd: o3d.geometry.PointCloud,
-    #     grasp: GraspCandidate,
-    #     show_safety_volume: bool = False,
-    # ):
-    #     """
-    #     Visualizes the grasp using the Gripper's geometry generation logic.
-    #     """
-    #     geometries = []
-    #
-    #     # 1. Ghost Object
-    #     pcd_copy = copy.deepcopy(pcd)
-    #     pcd_copy.paint_uniform_color([0.7, 0.7, 0.7])
-    #     geometries.append(pcd_copy)
-    #
-    #     # 2. Gripper Geometry
-    #     normal = -grasp.approach_vector
-    #     if show_safety_volume:
-    #         # Generate Safety Volume (Trimesh) -> Convert to O3D
-    #         mesh_trimesh = self.gripper.generate_safety_collision_mesh(
-    #             grasp.contact_point,
-    #             grasp.approach_vector,
-    #             self.config.approach_distance,
-    #         )
-    #         mesh_o3d = gu.trimesh_to_open3d(mesh_trimesh)
-    #         mesh_o3d.paint_uniform_color([0, 0, 1])  # Solid Blue
-    #     else:
-    #         # Generate Visual Mesh (GenericGeometry) -> Extract O3D
-    #         wrapper = self.gripper.generate_collision_mesh()
-    #         mesh_o3d = copy.deepcopy(wrapper.geometry)
-    #
-    #         # Transform from Origin to Grasp Pose
-    #         mesh_o3d.transform(grasp.transform)
-    #
-    #     geometries.append(mesh_o3d)
-    #
-    #     # 3. Coordinate Frame
-    #     frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
-    #     frame.transform(grasp.transform)
-    #     geometries.append(frame)
-    #
-    #     o3d.visualization.draw_geometries(
-    #         geometries, window_name=f"Score: {grasp.score:.2f}"
-    #     )
-    #
     def visualize_candidates_heatmap(
         self,
         pcd: o3d.geometry.PointCloud,
@@ -793,9 +651,17 @@ class VacuumGraspSampler(
             final_scores = [max(0.0, min(1.0, v)) for v in raw_values]
 
         # Generate Heatmap
+        print(
+            f"Num points: {len(points)}, Score Range: [{min(raw_values):.3f}, {max(raw_values):.3f}]"
+        )
+        print(f"final_scores Range: [{min(final_scores):.3f}, {max(final_scores):.3f}]")
         heatmap_pcd = gu.create_score_heatmap_pcd(points, final_scores)
         geometries.append(heatmap_pcd)
 
+        print("Here")
+        print(len(geometries))
+        print(geometries[0] is None)
+        print(geometries[1] is None)
         o3d.visualization.draw_geometries(
             geometries, window_name=f"Heatmap: {attribute.upper()}"
         )

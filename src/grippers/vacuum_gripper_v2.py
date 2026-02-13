@@ -10,7 +10,12 @@ from typing import List, Optional, Dict, Any
 from src.grippers.base_gripper import BaseGripper
 from src.generic_geometry import GenericGeometry
 import src.utils.geometry_utils as gu
-from src.grippers.pads import BaseSuctionPad, CircularPad, RectangularPad
+from src.grippers.pads import (
+    BaseSuctionPad,
+    CircularPad,
+    CircularPadZones,
+    RectangularPad,
+)
 
 # Standard Colors
 CUP_COLOR = [0.0, 0.8, 0.0]  # Green
@@ -137,6 +142,7 @@ class VacuumGripper(BaseGripper):
             length=float(
                 cup_data.get("length", default_length)
             ),  # Usa global se faltar
+            zones=CircularPadZones(num_radial_sections=2, num_angular_sections=4),
         )
 
     # =========================================================================

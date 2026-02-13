@@ -1091,5 +1091,67 @@ def create_score_heatmap_pcd(
         colors.append([r, g, b])
 
     heatmap_pcd.colors = o3d.utility.Vector3dVector(np.array(colors))
+    return heatmap_pcd
 
+
+def create_ring_mesh(
+    radius: float, thickness: float, height: float, relative: bool
+) -> trimesh.Trimesh:
+    """
+    Create a 3D mesh representing a ring (hollow cylinder).
+
+    Args:
+        radius (float): Outer radius of the ring.
+        thickness (float): Thickness of the ring walls.
+        height (float): Height of the ring.
+        relative (bool): Whether the thickness is relative to the radius.
+
+    Returns:
+        trimesh.Trimesh: The resulting geometry.
+    """
+    # Calculate inner radius
+    if relative:
+        inner_radius = radius * (1 - thickness)
+    else:
+        inner_radius = radius - thickness
+
+    inner_radius = max(inner_radius, 0)  # Ensure non-negative radius
+
+    outer_mesh = trimesh.creation.cylinder(radius=radius, height=height)
+    inner_mesh = trimesh.creation.cylinder(radius=inner_radius, height=height)
+
+    return outer_mesh.difference(inner_mesh)
+
+
+def create_wall_mesh(
+    width: float, height: float, thickness: float, depth: float, relative: bool
+) -> trimesh.Trimesh:
+    """
+    Create a 3D mesh representing a rectangular frame with hollowed-out walls.
+
+    Args:
+        width (float): Outer width of the box.
+        height (float): Outer height of the box.
+        thickness (float): Thickness of the walls.
+        depth (float): Depth of the box (length in the z-direction).
+        relative (bool): Whether the thickness is relative to the dimensions.
+
+    Returns:
+        trimesh.Trimesh: The resulting geometry.
+    """
+    # Calculate inner dimensions
+    if relative:
+        inner_width = width * (1 - thickness)
+        inner_height = height * (1 - thickness)
+    else:
+        inner_width = width - 2 * thickness
+        inner_height = height - 2 * thickness
+
+    inner_width = max(inner_width, 0)  # Ensure non-negative dimensions
+    inner_height = max(inner_height, 0)
+
+    outer_mesh = trimesh.creation.box(extents=[width, height, depth])
+    inner_mesh = trimesh.creation.box(extents=[inner_width, inner_height, depth])
+
+    return outer_mesh.difference(inner_mesh)
     return heatmap_pcd

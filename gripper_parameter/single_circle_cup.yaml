@@ -17,6 +17,14 @@ gripper:
       # 4cm to the left of center
       offset: [0.0, 0.0, 0.0] 
       radius: 0.030 # 20mm raio
+
+      thickness: 0.004          # Absolute thickness of the ring
+      relative_thickness: false # Thickness mode (absolute or relative)
+      max_sealing_distance: 0.0005
+
+      zones:
+        num_angular_sections: 8
+        num_radial_sections: 1
       # length: 0.05 # 5mm de comprimento
     #
 

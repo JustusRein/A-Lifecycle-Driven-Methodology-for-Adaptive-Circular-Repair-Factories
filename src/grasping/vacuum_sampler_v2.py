@@ -1,14 +1,17 @@
 import copy
+from logging import debug
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from typing import Dict, List, Literal, Optional, TypedDict
+
 import numpy as np
 import open3d as o3d
 import trimesh
-from dataclasses import dataclass
-from typing import List, Optional, TypedDict, Dict, Literal
 
-from src.grasping.base_sampler import BaseGraspSampler, GraspCandidate
-from src.grippers.vacuum_gripper_v2 import VacuumGripper
-from src.grasping.strategies import STRATEGY_REGISTRY
 import src.utils.geometry_utils as gu
+from src.grasping.base_sampler import BaseGraspSampler, GraspCandidate
+from src.grasping.strategies import STRATEGY_REGISTRY
+from src.grippers.vacuum_gripper_v2 import VacuumGripper
 
 # --- Types & Config ---
 
@@ -305,6 +308,31 @@ class VacuumGraspSampler(
                 cand, pcd_tree, all_points, all_normals, com_xy, max_torque_arm
             )
 
+    def debug_candidates(self, pcd: o3d.geometry.PointCloud, debug_idx: List[int]):
+        """
+        Calculates scores for all candidates.
+        """
+        all_points = np.asarray(pcd.points)
+        if not pcd.has_normals():
+            pcd.estimate_normals()
+        all_normals = np.asarray(pcd.normals)
+
+        pcd_tree = o3d.geometry.KDTreeFlann(pcd)
+        # Optimize: Calculate global stats once
+        com_xy, max_torque_arm = self._calculate_global_stats(pcd, all_points)
+
+        for idx in debug_idx:
+            cand = self.candidates[idx]
+            self._evaluate_single_candidate(
+                cand,
+                pcd_tree,
+                all_points,
+                all_normals,
+                com_xy,
+                max_torque_arm,
+                debug=True,
+            )
+
     def _evaluate_single_candidate(
         self,
         cand: GraspCandidate[VacuumScoreDetails],
@@ -313,6 +341,7 @@ class VacuumGraspSampler(
         all_normals: np.ndarray,
         com_xy: np.ndarray,
         max_torque_arm: float,
+        debug: bool = False,
     ) -> None:
         """
         Evaluates a single grasp candidate.
@@ -345,7 +374,7 @@ class VacuumGraspSampler(
 
         # 4. Multi-Pad Physical Evaluation (Seal)
         s_seal, pad_scores_dict = self._evaluate_suction_seal(
-            cand, contact_points, pcd_tree, all_points, all_normals
+            cand, contact_points, pcd_tree, all_points, all_normals, debug
         )
 
         if s_seal <= 0.0:
@@ -375,7 +404,7 @@ class VacuumGraspSampler(
         )
 
     def _evaluate_suction_seal(
-        self, cand, contact_points, pcd_tree, all_points, all_normals
+        self, cand, contact_points, pcd_tree, all_points, all_normals, debug
     ):
         """
         Calculates the Seal Score based on Zone Coverage.
@@ -409,7 +438,7 @@ class VacuumGraspSampler(
                 nearest_pt, search_radius
             )
 
-            if k < 5:
+            if k < 30:
                 pad_scores.append(0.0)
                 pad_details[pad.name] = 0.0
                 continue
@@ -422,39 +451,35 @@ class VacuumGraspSampler(
             # This aligns the pad's normal (Z) with the world Z, allowing 2D projection.
             local_points_3d = (neighbors - world_pad_pos) @ R_cand
             filtered_local_points = local_points_3d[
-                np.abs(local_points_3d[:, 2]) >= pad.max_sealing_distance
+                np.abs(local_points_3d[:, 2]) <= pad.max_sealing_distance
             ]
 
             # 3. Calculate Coverage
             zones_dict = pad.split_points_in_zones(filtered_local_points)
+            if debug:
+                debug_pad_projection(pad, filtered_local_points, zones_dict)
             # covered_zones = len(zones_dict)
             zones_areas = pad.zone_areas
             zone_scores = []
 
             for zone_name, pts in zones_dict.items():
                 target_area = zones_areas.get(zone_name, 0.0)
-                expected_count = (local_density_ref * target_area) * 4
+                expected_count = local_density_ref * target_area
                 valid_count = len(pts)
                 if valid_count == 0:
                     zone_scores.append(0.0)
                     continue
 
-                # Score = Real / Esperado
-                # Clamp em 1.0 (não ganha bonus por ter pontos demais)
+                # Score = real / expected
                 ratio = valid_count / expected_count
-                score = np.clip(ratio, 0, 1.0)
+                zone_scores.append(np.clip(ratio, 0, 1.0))
 
-                zone_scores.append(valid_count)
-            max_count = max(zone_scores)
-            if max_count > 0:
-                zone_scores = [s / max_count for s in zone_scores]
-            else:
-                zone_scores = [0.0 for s in zone_scores]
-            pad_scores.append(min(zone_scores))
-            pad_details[pad.name] = zone_scores
+            current_pad_score = min(zone_scores) if zone_scores else 0.0
+            pad_scores.append(current_pad_score)
+            pad_details[pad.name] = current_pad_score
 
-        # aggregated_seal = self._aggregate_pad_scores(pad_scores )
-        aggregated_seal = np.mean(pad_scores)
+        aggregated_seal = self._aggregate_pad_scores(pad_scores)
+        aggregated_seal = np.min(pad_scores)
 
         return aggregated_seal, pad_details
 
@@ -651,17 +676,78 @@ class VacuumGraspSampler(
             final_scores = [max(0.0, min(1.0, v)) for v in raw_values]
 
         # Generate Heatmap
-        print(
-            f"Num points: {len(points)}, Score Range: [{min(raw_values):.3f}, {max(raw_values):.3f}]"
-        )
-        print(f"final_scores Range: [{min(final_scores):.3f}, {max(final_scores):.3f}]")
         heatmap_pcd = gu.create_score_heatmap_pcd(points, final_scores)
         geometries.append(heatmap_pcd)
 
-        print("Here")
-        print(len(geometries))
-        print(geometries[0] is None)
-        print(geometries[1] is None)
         o3d.visualization.draw_geometries(
             geometries, window_name=f"Heatmap: {attribute.upper()}"
         )
+
+    def debug_specific_grasp(
+        self, pcd: o3d.geometry.PointCloud, candidate: GraspCandidate
+    ):
+        """
+        Força a avaliação de um único candidato com todas as flags de debug ativas.
+        """
+
+        all_points = np.asarray(pcd.points)
+        all_normals = np.asarray(pcd.normals)
+        pcd_tree = o3d.geometry.KDTreeFlann(pcd)
+        com_xy, max_torque_arm = self._calculate_global_stats(pcd, all_points)
+
+        # 3. Executar avaliação (isso vai disparar os plots do Matplotlib)
+        print(f"--- Debugging Grasp em {candidate.contact_point} ---")
+        self._evaluate_single_candidate(
+            candidate, pcd_tree, all_points, all_normals, com_xy, max_torque_arm, True
+        )
+
+        # 4. Mostrar o grasp em 3D para referência
+        self.visualize_grasp(pcd, candidate, show_safety_volume=True)
+
+
+def debug_pad_projection(pad, local_points_3d, zone_dict):
+    """
+    Visualiza a projeção 2D dos pontos no frame local da ventosa.
+    """
+    plt.figure(figsize=(6, 6))
+
+    # 1. Plotar todos os pontos projetados (X, Y)
+    plt.scatter(
+        local_points_3d[:, 0],
+        local_points_3d[:, 1],
+        c="gray",
+        s=1,
+        alpha=0.5,
+        label="Todos os pontos",
+    )
+
+    # 2. Destacar pontos por zona
+    colors = ["red", "green", "blue", "yellow"]
+    for i, (zone_name, pts) in enumerate(zone_dict.items()):
+        if len(pts) > 0:
+            plt.scatter(pts[:, 0], pts[:, 1], s=5, label=f"Zona: {zone_name}")
+
+    # 3. Desenhar os limites físicos da ventosa (círculos)
+    theta = np.linspace(0, 2 * np.pi, 100)
+    # Círculo externo
+    plt.plot(
+        pad.safety_radius * np.cos(theta),
+        pad.safety_radius * np.sin(theta),
+        "k--",
+        label="Raio Externo",
+    )
+    # Se houver um raio interno (furo da ventosa)
+    if hasattr(pad, "inner_radius"):
+        plt.plot(
+            pad.inner_radius * np.cos(theta),
+            pad.inner_radius * np.sin(theta),
+            "r:",
+            label="Furo Interno",
+        )
+
+    plt.title(f"Debug Projeção: {pad.name}")
+    plt.xlabel("Local X (m)")
+    plt.ylabel("Local Y (m)")
+    plt.axis("equal")
+    plt.legend()
+    plt.show()

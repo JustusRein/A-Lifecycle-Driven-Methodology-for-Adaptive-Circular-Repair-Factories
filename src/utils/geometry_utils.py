@@ -1154,4 +1154,3 @@ def create_wall_mesh(
     inner_mesh = trimesh.creation.box(extents=[inner_width, inner_height, depth])
 
     return outer_mesh.difference(inner_mesh)
-    return heatmap_pcd

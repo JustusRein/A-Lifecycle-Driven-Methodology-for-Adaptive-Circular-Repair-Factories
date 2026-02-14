@@ -207,6 +207,8 @@ class CircularPad(BaseSuctionPad):
                 )
                 if len(zone_points) > 0:
                     zone_dict[zone_name] = zone_points
+                else:
+                    zone_dict[zone_name] = []
 
         return zone_dict
 
@@ -427,7 +429,7 @@ class RectangularPad(BaseSuctionPad):
         )
 
     @cached_property
-    def get_zone_areas(self) -> Dict[str, float]:
+    def zone_areas(self) -> Dict[str, float]:
         areas = {}
 
         # Dimensões da moldura

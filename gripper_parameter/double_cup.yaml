@@ -1,39 +1,44 @@
 gripper:
   name: "Double_Schmalz_ECG"
-
   # Visual: Path for the detailed visual mesh (if available)
   visual_mesh_path: null
-
   # Collision: Path for the detailed collision mesh (if available)
   collision_mesh_path: null
-
   # --- PADS CONFIGURATION ---
   # Z-height of the TCP (length of the stem + relaxed cup)
   pad_height: 0.05
-
   pads:
     # --- LEFT SUCTION CUP ---
     - type: "circle"            # Strictly "circle" or "rect"
       name: "left_cup"
       # Position: 4cm to the left of the center
-      offset: [-0.04, 0.0, 0.0]
-      radius: 0.015             # 15mm radius (30mm diameter)
-      thickness: 0.002          # Absolute thickness of the ring
+      offset: [-0.02, 0.0, 0.0]
+      radius: 0.010             # 15mm radius (30mm diameter)
+      thickness: 0.001          # Absolute thickness of the ring
       relative_thickness: false # Thickness mode (absolute or relative)
-
+      max_sealing_distance: 0.005
       zones:
         num_angular_sections: 8
         num_radial_sections: 1
-
     # --- RIGHT SUCTION CUP ---
     - type: "circle"
       name: "right_cup"
       # Position: 4cm to the right of the center
-      offset: [0.04, 0.0, 0.0]
-      radius: 0.015
-      thickness: 0.002          # Absolute thickness
+      offset: [0.02, 0.0, 0.0]
+      radius: 0.010
+      thickness: 0.001          # Absolute thickness
       relative_thickness: false # Absolute thickness setting
-
+      max_sealing_distance: 0.005
       zones:
         num_angular_sections: 8
         num_radial_sections: 1
+  # --- BODY CONFIG ---
+  # The main gripper body that holds the suction cups
+  body:
+    radius: 0.05   # Raio do corpo que segura as ventosas
+    length: 0.10   # Comprimento total do corpo
+  # --- SAFETY PARAMETERS ---
+  safety:
+    standoff_distance: 0.15 # Distância de aproximação (Pre-grasp)
+    collision_margin: 0.05  # Margem extra de 5% nas colisões
+  grasp_strategy: 'projection'

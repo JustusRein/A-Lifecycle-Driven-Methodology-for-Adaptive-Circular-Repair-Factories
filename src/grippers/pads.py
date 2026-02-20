@@ -1,0 +1,470 @@
+from __future__ import annotations
+import abc
+from functools import cached_property
+import numpy as np
+import trimesh
+from dataclasses import dataclass
+from typing import Dict, Tuple, Type, TypedDict, Any
+
+
+# --- CONFIGURATION SCHEMAS ---
+class CircularPadZones(TypedDict):
+    num_radial_sections: int
+    num_angular_sections: int
+
+
+class RectangularPadZones(TypedDict):
+    num_width_sections: int
+    num_height_sections: int
+
+
+class BaseSuctionPad(abc.ABC):
+    """
+    Abstract Base Class for a generic Suction Pad.
+    Follows Open/Closed Principle.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        offset: np.ndarray,
+        length: float = 0.0,
+        max_sealing_distance: float = 0.001,
+    ):
+        self.name = name
+        self.offset = np.array(offset, dtype=np.float64)
+        self.length = length
+        self.max_sealing_distance = max_sealing_distance
+
+    @abc.abstractmethod
+    def is_point_inside(self, local_points_xy: np.ndarray) -> np.ndarray:
+        pass
+
+    @abc.abstractmethod
+    def get_collision_mesh(self) -> trimesh.Trimesh:
+        pass
+
+    @property
+    @abc.abstractmethod
+    def safety_radius(self) -> float:
+        pass
+
+    @abc.abstractmethod
+    def get_safety_mesh(self, margin_scale: float) -> trimesh.Trimesh:
+        pass
+
+    @staticmethod
+    def from_config(config: Dict[str, Any]) -> "BaseSuctionPad":
+        cfg = config.copy()
+        pad_type = cfg.pop("type", "circle")
+
+        if "offset" in cfg:
+            cfg["offset"] = np.array(cfg["offset"])
+
+        global REGISTRY
+        if pad_type not in REGISTRY:
+            raise ValueError(
+                f"Unknown pad type: {pad_type}. Available: {list(REGISTRY.keys())}"
+            )
+
+        pad_class = REGISTRY[pad_type]
+        return pad_class(**cfg)
+
+    @abc.abstractmethod
+    def split_points_in_zones(self, points_3d: np.ndarray) -> Dict[str, np.ndarray]:
+        pass
+
+    @cached_property
+    @abc.abstractmethod
+    def total_zones(self) -> int:
+        pass
+
+    @cached_property
+    @abc.abstractmethod
+    def zone_areas(self) -> Dict[str, float]:
+        """
+        Retorna a área física (m²) de cada zona gerada pelo split.
+        Usado para cálculo de densidade esperada.
+        """
+        pass
+
+
+@dataclass
+class CircularPad(BaseSuctionPad):
+    """
+    Standard circular suction cup.
+    """
+
+    radius: float
+    length: float
+    max_sealing_distance: float
+    thickness: float
+    relative_thickness: bool
+    zones: CircularPadZones
+
+    # Internal: Stores the thickness in absolute meters
+    abs_thickness: float = 0.0
+
+    def __init__(
+        self,
+        name: str,
+        offset: np.ndarray,
+        zones: CircularPadZones,
+        radius: float,
+        length: float,
+        max_sealing_distance: float,
+        thickness: float,
+        relative_thickness: bool = False,
+    ):
+        super().__init__(name, offset, length, max_sealing_distance)
+        self.zones = zones
+        self.radius = radius
+        self.thickness = thickness
+        self.relative_thickness = relative_thickness
+        self._calculate_thickness()
+
+    def _calculate_thickness(self):
+        # --- PRE-CALCULATION ---
+        # Convert relative to absolute immediately upon initialization
+        if self.relative_thickness:
+            self.abs_thickness = self.radius * self.thickness
+        else:
+            self.abs_thickness = self.thickness
+
+    def is_point_inside(self, local_points_xy: np.ndarray) -> np.ndarray:
+        dists = np.linalg.norm(local_points_xy, axis=1)
+        return dists <= self.radius
+
+    def get_collision_mesh(self) -> trimesh.Trimesh:
+        # Use pre-calculated absolute thickness
+        inner_radius = max(self.radius - self.abs_thickness, 0.0)
+
+        mesh = trimesh.creation.cylinder(radius=self.radius, height=self.length)
+        inner_mesh = trimesh.creation.cylinder(radius=inner_radius, height=self.length)
+
+        mesh = mesh.difference(inner_mesh)
+        mesh.apply_translation([0, 0, -self.length / 2.0])
+        mesh.apply_translation(self.offset)
+        return mesh
+
+    @property
+    def safety_radius(self) -> float:
+        return self.radius
+
+    def get_safety_mesh(self, margin_scale: float) -> trimesh.Trimesh:
+        # Scale the geometry logic
+        safe_radius = self.radius * margin_scale
+        safe_thickness = self.abs_thickness * margin_scale
+
+        inner_safe_radius = max(safe_radius - safe_thickness, 0.0)
+
+        mesh = trimesh.creation.cylinder(radius=safe_radius, height=self.length)
+        inner_mesh = trimesh.creation.cylinder(
+            radius=inner_safe_radius, height=self.length
+        )
+
+        mesh = mesh.difference(inner_mesh)
+        mesh.apply_translation([0, 0, -self.length / 2.0])
+        mesh.apply_translation(self.offset)
+        return mesh
+
+    def split_points_in_zones(self, points_3d: np.ndarray) -> Dict[str, np.ndarray]:
+        """
+        Splits points into a Polar Grid using the pre-calculated abs_thickness.
+        """
+        local_points = points_3d[:, :2]
+        dists = np.linalg.norm(local_points, axis=1)
+
+        angles = np.arctan2(local_points[:, 1], local_points[:, 0])
+        angles = (angles + 2 * np.pi) % (2 * np.pi)
+
+        n_rad = self.zones.get("num_radial_sections", 1)
+        n_ang = self.zones.get("num_angular_sections", 4)
+
+        radial_step = self.abs_thickness / max(n_rad, 1)
+        angular_step = 2 * np.pi / max(n_ang, 1)
+
+        return self._populate_zone_dict(
+            points_3d, dists, angles, n_rad, n_ang, radial_step, angular_step
+        )
+
+    def _populate_zone_dict(
+        self,
+        points_3d: np.ndarray,
+        dists: np.ndarray,
+        angles: np.ndarray,
+        n_rad: int,
+        n_ang: int,
+        radial_step: float,
+        angular_step: float,
+    ) -> Dict[str, np.ndarray]:
+        zone_dict = {}
+
+        for r in range(n_rad):
+            for a in range(n_ang):
+                zone_name, zone_points = self._process_zone(
+                    points_3d, dists, angles, r, a, radial_step, angular_step
+                )
+                if len(zone_points) > 0:
+                    zone_dict[zone_name] = zone_points
+                else:
+                    zone_dict[zone_name] = []
+
+        return zone_dict
+
+    def _process_zone(
+        self,
+        points_3d: np.ndarray,
+        dists: np.ndarray,
+        angles: np.ndarray,
+        r: int,
+        a: int,
+        radial_step: float,
+        angular_step: float,
+    ) -> Tuple[str, np.ndarray]:
+        """
+        Process a single zone within the grid.
+        """
+        r_inner = self.radius - self.abs_thickness
+        bin_r_min = r_inner + (r * radial_step)
+        bin_r_max = r_inner + ((r + 1) * radial_step)
+
+        bin_a_min = a * angular_step
+        bin_a_max = (a + 1) * angular_step
+
+        in_radial = (dists >= bin_r_min) & (dists < bin_r_max + 1e-5)
+        in_angular = (angles >= bin_a_min) & (angles < bin_a_max)
+
+        mask = in_radial & in_angular
+
+        zone_name = f"R{r}_A{a}"
+        if np.any(mask):
+            return zone_name, points_3d[mask]
+
+        return (zone_name, np.array([]))
+
+    @cached_property
+    def total_zones(self) -> int:
+        return self.zones["num_radial_sections"] * self.zones["num_angular_sections"]
+
+    @cached_property
+    def zone_areas(self) -> Dict[str, float]:
+        # Área do Anel = pi * (R_out^2 - R_in^2)
+        r_out = self.radius
+        r_in = self.radius - self.abs_thickness
+        total_ring_area = np.pi * (r_out**2 - r_in**2)
+
+        n_rad = self.zones.get("num_radial_sections", 1)
+        n_ang = self.zones.get("num_angular_sections", 4)
+        total_sections = n_rad * n_ang
+
+        # Como dividimos igualmente:
+        area_per_zone = total_ring_area / max(total_sections, 1)
+
+        # Gera o dicionário com as mesmas chaves do split
+        areas = {}
+        for r in range(n_rad):
+            for a in range(n_ang):
+                areas[f"R{r}_A{a}"] = area_per_zone
+        return areas
+
+
+@dataclass
+class RectangularPad(BaseSuctionPad):
+    """
+    Rectangular foam pad with independent width/height thickness.
+    """
+
+    width: float
+    height: float
+    length: float
+    max_sealing_distance: float
+    w_thickness: float
+    h_thickness: float
+    relative_thickness: bool
+    zones: RectangularPadZones
+
+    # Internal: Absolute values in meters
+    abs_w_thickness: float = 0.0
+    abs_h_thickness: float = 0.0
+
+    def __init__(
+        self,
+        name: str,
+        offset: np.ndarray,
+        zones: RectangularPadZones,
+        width: float,
+        height: float,
+        length: float,
+        max_sealing_distance: float,
+        w_thickness: float = 0.01,
+        h_thickness: float = 0.01,
+        relative_thickness: bool = False,
+        **kwargs,
+    ):
+        super().__init__(name, offset, length, max_sealing_distance)
+        self.zones = zones
+        self.width = width
+        self.height = height
+        self.w_thickness = w_thickness
+        self.h_thickness = h_thickness
+        self.relative_thickness = relative_thickness
+        self._calculate_thickness()
+
+    def _calculate_thickness(self):
+        # --- PRE-CALCULATION ---
+        # Convert relative (percentage) to absolute (meters) immediately
+        if self.relative_thickness:
+            self.abs_w_thickness = self.width * self.w_thickness
+            self.abs_h_thickness = self.height * self.h_thickness
+        else:
+            self.abs_w_thickness = self.w_thickness
+            self.abs_h_thickness = self.h_thickness
+
+    def is_point_inside(self, local_points_xy: np.ndarray) -> np.ndarray:
+        x = np.abs(local_points_xy[:, 0])
+        y = np.abs(local_points_xy[:, 1])
+        return (x <= self.width / 2.0) & (y <= self.height / 2.0)
+
+    def get_collision_mesh(self) -> trimesh.Trimesh:
+        # Use absolute values directly
+        inner_w = max(self.width - (self.abs_w_thickness * 2), 0.0)
+        inner_h = max(self.height - (self.abs_h_thickness * 2), 0.0)
+
+        outer_mesh = trimesh.creation.box(
+            extents=[self.width, self.height, self.length]
+        )
+        inner_mesh = trimesh.creation.box(extents=[inner_w, inner_h, self.length])
+
+        mesh = outer_mesh.difference(inner_mesh)
+        mesh.apply_translation([0, 0, -self.length / 2.0])
+        mesh.apply_translation(self.offset)
+        return mesh
+
+    @property
+    def safety_radius(self) -> float:
+        return np.sqrt((self.width / 2) ** 2 + (self.height / 2) ** 2)
+
+    def get_safety_mesh(self, margin_scale: float) -> trimesh.Trimesh:
+        safe_w = self.width * margin_scale
+        safe_h = self.height * margin_scale
+
+        # Scale the absolute thickness by the margin to maintain proportions
+        scaled_w_thick = self.abs_w_thickness * margin_scale
+        scaled_h_thick = self.abs_h_thickness * margin_scale
+
+        inner_safe_w = max(safe_w - (scaled_w_thick * 2), 0.0)
+        inner_safe_h = max(safe_h - (scaled_h_thick * 2), 0.0)
+
+        outer_mesh = trimesh.creation.box(extents=[safe_w, safe_h, self.length])
+        inner_mesh = trimesh.creation.box(
+            extents=[inner_safe_w, inner_safe_h, self.length]
+        )
+        mesh = outer_mesh.difference(inner_mesh)
+
+        mesh.apply_translation([0, 0, -self.length / 2.0])
+        mesh.apply_translation(self.offset)
+        return mesh
+
+    def split_points_in_zones(self, points_3d: np.ndarray) -> Dict[str, np.ndarray]:
+        """
+        Divides the PERIMETER using pre-calculated absolute thicknesses.
+        """
+        x = points_3d[:, 0]
+        y = points_3d[:, 1]
+
+        half_w = self.width / 2.0
+        half_h = self.height / 2.0
+
+        # Inner boundaries using absolute values
+        inner_x_limit = max(0.0, half_w - self.abs_w_thickness)
+        inner_y_limit = max(0.0, half_h - self.abs_h_thickness)
+
+        zone_dict = {}
+
+        def split_strip(p_mask, axis_vals, start, end, num_sections, prefix):
+            if not np.any(p_mask):
+                return
+
+            pts = points_3d[p_mask]
+            vals = axis_vals[p_mask]
+
+            n_sec = max(num_sections, 1)
+            bins = np.linspace(start, end, n_sec + 1)
+
+            for i in range(n_sec):
+                b_min, b_max = bins[i], bins[i + 1]
+                bin_mask = (vals >= b_min) & (vals <= b_max)
+
+                if np.any(bin_mask):
+                    zone_dict[f"{prefix}_{i}"] = pts[bin_mask]
+                else:
+                    zone_dict[f"{prefix}_{i}"] = np.array([])
+
+        n_w = self.zones.get("num_width_sections", 1)
+        n_h = self.zones.get("num_height_sections", 1)
+
+        # 1. TOP STRIP (North)
+        mask_top = (y > inner_y_limit) & (y <= half_h) & (np.abs(x) <= half_w)
+        split_strip(mask_top, x, -half_w, half_w, n_w, "top")
+
+        # 2. BOTTOM STRIP (South)
+        mask_bottom = (y < -inner_y_limit) & (y >= -half_h) & (np.abs(x) <= half_w)
+        split_strip(mask_bottom, x, -half_w, half_w, n_w, "bottom")
+
+        # 3. RIGHT STRIP (East)
+        mask_right = (x > inner_x_limit) & (x <= half_w) & (np.abs(y) <= inner_y_limit)
+        split_strip(mask_right, y, -inner_y_limit, inner_y_limit, n_h, "right")
+
+        # 4. LEFT STRIP (West)
+        mask_left = (x < -inner_x_limit) & (x >= -half_w) & (np.abs(y) <= inner_y_limit)
+        split_strip(mask_left, y, -inner_y_limit, inner_y_limit, n_h, "left")
+
+        return zone_dict
+
+    @cached_property
+    def total_zones(self) -> int:
+        return 2 * (
+            self.zones["num_width_sections"] + self.zones["num_height_sections"]
+        )
+
+    @cached_property
+    def zone_areas(self) -> Dict[str, float]:
+        areas = {}
+
+        # Dimensões da moldura
+        w = self.width
+        h = self.height
+        t_w = self.abs_w_thickness
+        t_h = self.abs_h_thickness
+
+        n_w = self.zones.get("num_width_sections", 1)
+        n_h = self.zones.get("num_height_sections", 1)
+
+        # 1. Top/Bottom Strips (Largura Total * Espessura Altura)
+        # Nota: No split anterior, Top/Bottom cobrem a largura inteira (W)
+        area_top_total = w * t_h
+        area_bot_total = w * t_h
+
+        # 2. Left/Right Strips (Altura Interna * Espessura Largura)
+        # Nota: No split anterior, L/R são limitados pela altura interna para não sobrepor
+        inner_h = max(h - 2 * t_h, 0.0)
+        area_right_total = inner_h * t_w
+        area_left_total = inner_h * t_w
+
+        # Preenche o dicionário dividindo pelo número de seções
+        for i in range(n_w):
+            areas[f"top_{i}"] = area_top_total / n_w
+            areas[f"bottom_{i}"] = area_bot_total / n_w
+
+        for i in range(n_h):
+            areas[f"right_{i}"] = area_right_total / n_h
+            areas[f"left_{i}"] = area_left_total / n_h
+
+        return areas
+
+
+REGISTRY: Dict[str, Type[BaseSuctionPad]] = {
+    "circle": CircularPad,
+    "rect": RectangularPad,
+}

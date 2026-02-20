@@ -1,0 +1,36 @@
+gripper:
+  name: "Schmalz_ECG_Double_Custom"
+  
+  # Visual Asset (Optional: set to null to see the generated cylinders)
+  visual_mesh_path: null
+
+  # --- NEW: MULTI-PAD DEFINITION ---
+  # Replaces the old 'suction_cup' single entry.
+  # Modeling a custom bracket holding two standard 20mm cups.
+  pads:
+    - type: "circle"
+      name: "left_cup"
+      offset: [0.0, 0.0, 0.0]  # 45mm to the Left
+      radius: 0.010               # 20mm Radius
+      length: 0.05                # 5mm Length
+
+
+  # --- BODY PARAMETERS ---
+  # Kept from your reference (Schmalz ECG Body)
+  body:
+    radius: 0.07575       # 75.75mm
+    length: 0.0886        # 88.6mm
+
+  # --- SAFETY PARAMETERS ---
+  safety:
+    standoff_distance: 0.05
+    collision_margin: 0.05
+
+# --- SAMPLER CONFIGURATION ---
+# These parameters control how the algorithm behaves for this specific gripper.
+sampler:
+  rotation_strategy: "uniform" # Asymmetric gripper requires rotation
+  rotation_step_deg: 45        # Test every 45 degrees
+  rotation_range_deg: 180      # 0 to 180 covers all cases for bilateral symmetry
+  
+  score_aggregation: "min"     # If one cup hits a hole, score is 0.0

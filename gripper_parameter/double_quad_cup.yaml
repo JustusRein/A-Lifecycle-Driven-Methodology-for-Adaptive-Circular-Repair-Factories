@@ -1,0 +1,71 @@
+gripper:
+  name: "Double_Rectangular_Foam"
+  
+  # Visual: Path to the detailed visual mesh (if available)
+  visual_mesh_path: null
+  
+  # Collision: Path to the collision mesh (if available)
+  collision_mesh_path: null
+
+  # --- PADS CONFIGURATION ---
+  # Z Height of the TCP (length of the rod + relaxed foam)
+  pad_height: 0.05 
+  
+  pads:
+    # --- LEFT PAD (Rectangular) ---
+    - type: "rect"              # Strict type: "rect"
+      name: "left_pad"
+      # Position: 3cm to the left of the center
+      offset: [-0.015, 0.0, 0.0]
+      
+      # Physical Dimensions
+      width: 0.015              # 40mm width (X)
+      height: 0.020             # 60mm height (Y)
+      
+      # Sealing Frame Configuration (Perimeter)
+      # Defined with 5mm absolute sealing edge
+      w_thickness: 0.003        # 5mm on sides (Left/Right)
+      h_thickness: 0.003        # 5mm on top/bottom
+      relative_thickness: false # Uses absolute meters, not percentages
+      
+      # Physical Tolerance (Z Filter)
+      # Foams tolerate more compression than rubber suction cups (e.g., 3mm)
+      max_sealing_distance: 0.005
+      
+      # Division of Zones for Validation
+      zones:
+        # Divides top/bottom strips into 2 pieces each
+        num_width_sections: 3   
+        # Divides side strips into 3 pieces each
+        num_height_sections: 3  
+
+    # --- RIGHT PAD (Rectangular) ---
+    - type: "rect"
+      name: "right_pad"
+      # Position: 3cm to the right of the center
+      offset: [0.015, 0.0, 0.0] 
+      
+      width: 0.015
+      height: 0.020
+      
+      w_thickness: 0.003
+      h_thickness: 0.003
+      relative_thickness: false
+      max_sealing_distance: 0.005
+      
+      zones:
+        num_width_sections: 3
+        num_height_sections: 3
+
+  # --- BODY CONFIGURATION ---
+  # The main body of the gripper (box or cylinder holding the pads)
+  body:
+    radius: 0.05   # Enclosing radius of the body
+    length: 0.10   # Total length of the body
+
+  # --- SAFETY PARAMETERS ---
+  safety:
+    standoff_distance: 0.15 # Approach distance (Pre-grasp)
+    collision_margin: 0.05  # Extra collision margin of 5%
+  grasp_strategy: 'projection'
+

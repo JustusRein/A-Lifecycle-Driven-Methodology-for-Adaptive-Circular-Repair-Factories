@@ -2687,9 +2687,7 @@ for iii in range(len(paired_planes)):
         ax.legend(loc="best")
         plt.tight_layout()
         os.makedirs("Image", exist_ok=True)
-        plt.savefig(
-            "Image\\feasible_tcp_all_2d.svg", format="svg", bbox_inches="tight"
-        )
+        plt.savefig("Image\\feasible_tcp_all_2d.svg", format="svg", bbox_inches="tight")
         plt.show()
 
     if no_image == False:

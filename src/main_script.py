@@ -595,7 +595,9 @@ o3d.visualization.draw_geometries(
 original_points = np.asarray(pcd_target_in_scan.points)
 original_indices = np.arange(len(original_points))
 # ----------------  initialize parameters for plane extraction ----------------
-plane_indices_list = []  # for each plane, the indices of its points in the original point cloud
+plane_indices_list = (
+    []
+)  # for each plane, the indices of its points in the original point cloud
 plane_colors = []  # for each plane, its color
 plane_models = []  # for each plane, its model (ax+by+cz+d)
 plane_normals = []  # for each plane, its normal vector

@@ -73,7 +73,7 @@ class VacuumGripper(BaseGripper):
 
     def generate_collision_mesh(self) -> GenericGeometry:
         """
-        Gera a geometria VISUAL (Open3D).
+        Generates the VISUAL geometry (Open3D).
         """
         # Backend padrão é 'open3d'
         cup_mesh: o3d.geometry.TriangleMesh = self._make_cup_mesh(backend="open3d")
@@ -98,23 +98,23 @@ class VacuumGripper(BaseGripper):
         approach_distance: float,
     ) -> trimesh.Trimesh:
         """
-        Gera a geometria de COLISÃO (Trimesh).
+        Generates the COLLISION geometry (Trimesh).
         """
         factor = 1.0 + self.config.collision_margin
         r_cup_safe = self.config.cup_radius * factor
         r_body_safe = self.config.body_radius * factor
 
-        # 1. Ventosa
+        # 1. Suction Cup
         mesh_cup = gu.create_cylinder(
             start_point=contact_point,
             direction_vector=surface_normal,
             length=self.config.cup_height,
             radius=r_cup_safe,
-            backend="trimesh",  # Força backend Trimesh
-            color=CUP_MESH_COLOR,  # Azul RGBA para trimesh
+            backend="trimesh",  # Forces Trimesh backend
+            color=CUP_MESH_COLOR,  # Blue RGBA for trimesh
         )
 
-        # 2. Corpo
+        # 2. Body
         start_body = contact_point + (surface_normal * self.config.cup_height)
         mesh_body = gu.create_cylinder(
             start_point=start_body,

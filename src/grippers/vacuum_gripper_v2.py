@@ -141,8 +141,10 @@ class VacuumGripper(BaseGripper):
             radius=float(cup_data.get("radius", 0.02)),
             length=float(
                 cup_data.get("length", default_length)
-            ),  # Usa global se faltar
+            ),  # Uses global if missing
             zones=CircularPadZones(num_radial_sections=2, num_angular_sections=4),
+            max_sealing_distance=0.005,
+            thickness=0.002,
         )
 
     # =========================================================================

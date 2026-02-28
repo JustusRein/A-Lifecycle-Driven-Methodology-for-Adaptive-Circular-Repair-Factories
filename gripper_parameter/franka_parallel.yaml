@@ -1,0 +1,46 @@
+# ==========================================================
+# Parallel Gripper Configuration (Franka Emika Panda)
+# Units: Meters (m)
+# ==========================================================
+
+# name: "Franka_Parallel_Gripper"
+
+# --- 1. Gripper Opening Constraints ---
+f_pg: 0.080  # Max opening distance (80mm)
+g_pg: 0.000  # Min closing distance (0mm)
+
+# --- 2. Finger Dimensions ---
+a_pg: 0.020  # Finger width
+e_pg: 0.020  # Finger depth
+b_pg: 0.030  # Gripper contact area length
+c_pg: 0.010  # Gripper non-contact length (from base to contact area)
+z_pg: 0.020  # Gripper area depth
+
+# --- 3. Finger Safety / Clearance (Safespace) ---
+w_pg: 0.005  # Internal safespace finger width clearance
+v_pg: 0.005  # External safespace finger width clearance
+i_pg: 0.025  # Safespace finger depth
+d_pg: 0.045  # Safespace Gripper total length
+x_pg: 0.002  # Safespace Gripper end to rubber pad
+
+# --- 4. Gripper Base (Bottom Part - Closer to fingers) ---
+h_pg: 0.150  # Gripper base bottom width
+l_pg: 0.050  # Gripper base bottom depth
+t_pg: 0.040  # Gripper base bottom length
+k_pg: 0.160  # Safespace Gripper base bottom width
+m_pg: 0.060  # Safespace gripper base bottom depth
+
+# --- 5. Gripper Base (Top Part - Closer to robot flange) ---
+q_pg: 0.080  # Gripper base top width
+o_pg: 0.080  # Gripper base top depth
+u_pg: 0.060  # Gripper base top length
+r_pg: 0.090  # Safespace Gripper base top width
+p_pg: 0.090  # Safespace gripper base top depth
+
+# --- 6. Robot Arm Constraints (Last Joint / Flange) ---
+ra: 0.080    # Width of last robot arm limb
+rb: 0.080    # Depth of last robot arm limb
+rc: 0.100    # Length of last robot arm limb
+re: 0.010    # Robot arm diameter clearance
+rf: 0.010    # Robot arm length clearance
+rj: 0.001    # Repeatability tolerance of robot arm

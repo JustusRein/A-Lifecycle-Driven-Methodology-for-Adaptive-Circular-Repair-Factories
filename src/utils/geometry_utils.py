@@ -705,31 +705,31 @@ def create_cylinder_trimesh(
     Generate a cylinder Trimesh oriented along a direction vector.
 
     Args:
-        color: Lista RGBA [0-255].
+        color: RGBA list [0-255].
     """
-    # 1. Criar cilindro básico (alinhado em Z, centro na origem 0,0,0)
+    # 1. Create basic cylinder (aligned in Z, center at origin 0,0,0)
     mesh = trimesh.creation.cylinder(radius=radius, height=length)
 
-    # 2. Calcular matriz de rotação para alinhar Z com o vetor de direção
-    # O trimesh devolve uma matriz 4x4 completa
+    # 2. Calculate rotation matrix to align Z with the direction vector
+    # Trimesh returns a complete 4x4 matrix
     z_axis = np.array([0, 0, 1])
     T_rot = trimesh.geometry.align_vectors(z_axis, direction_vector)
 
-    # 3. Aplicar a rotação
+    # 3. Apply the rotation
     mesh.apply_transform(T_rot)
 
-    # 4. Translação
-    # O cilindro agora está rodado, mas ainda centrado na origem (0,0,0).
-    # Precisamos movê-lo para que a BASE fique no start_point.
-    # O centro final deve ser: Start + (Direção Normalizada * Metade do Comprimento)
+    # 4. Translation
+    # The cylinder is now rotated, but still centered at the origin (0,0,0).
+    # We need to move it so that the BASE is at start_point.
+    # The final center should be: Start + (Normalized Direction * Half Length)
     vec_norm = direction_vector / np.linalg.norm(direction_vector)
     final_center = start_point + (vec_norm * (length / 2.0))
 
-    # Como o mesh está em 0,0,0, basta aplicar uma translação direta
+    # Since the mesh is at 0,0,0, we just apply a direct translation
     T_trans = trimesh.transformations.translation_matrix(final_center)
     mesh.apply_transform(T_trans)
 
-    # 5. Cor
+    # 5. Color
     if color is not None:
         # CONVERSION LOGIC:
         # Input is 0.0-1.0. Trimesh wants 0-255.
@@ -748,31 +748,31 @@ def create_cylinder_o3d(
     color: Optional[List[float]] = None,
 ) -> o3d.geometry.TriangleMesh:
     """
-    Gera um cilindro Open3D orientado.
+    Generates an oriented Open3D cylinder.
 
     Args:
-        color: Lista RGB [0.0-1.0].
+        color: RGB list [0.0-1.0].
     """
-    # 1. Criar cilindro (alinhado em Z, centro na origem)
+    # 1. Create cylinder (aligned in Z, center at origin)
     mesh = o3d.geometry.TriangleMesh.create_cylinder(radius=radius, height=length)
 
-    # 2. Obter matriz de rotação via Trimesh
+    # 2. Get rotation matrix via Trimesh
     z_axis = np.array([0, 0, 1])
     T_rot = trimesh.geometry.align_vectors(z_axis, direction_vector, return_angle=False)
 
-    # O Open3D usa apenas a parte 3x3 para rotação (R)
+    # Open3D only uses the 3x3 part for rotation (R)
     R = T_rot[:3, :3]
 
-    # 3. Aplicar rotação (em torno do centro 0,0,0)
+    # 3. Apply rotation (around center 0,0,0)
     mesh.rotate(R, center=np.array([0, 0, 0]))
 
-    # 4. Translação para o centro final
+    # 4. Translation to final center
     vec_norm = direction_vector / np.linalg.norm(direction_vector)
     final_center = start_point + (vec_norm * (length / 2.0))
 
     mesh.translate(final_center)
 
-    # 5. Cor
+    # 5. Color
     if color is not None:
         # SANITIZATION LOGIC:
         # Input is [R, G, B, A]. Open3D only supports [R, G, B].
@@ -845,23 +845,23 @@ def merge_meshes(
     meshes: Union[List[trimesh.Trimesh], List[o3d.geometry.TriangleMesh]],
 ) -> Union[trimesh.Trimesh, o3d.geometry.TriangleMesh]:
     """
-    Combina uma lista de malhas em uma única malha,
-    detectando automaticamente se é Trimesh ou Open3D.
+    Combines a list of meshes into a single mesh,
+    automatically detecting if it's Trimesh or Open3D.
     """
     if not meshes:
-        raise ValueError("A lista de malhas está vazia.")
+        raise ValueError("The mesh list is empty.")
 
-    # Verifica o tipo do primeiro elemento para decidir a estratégia
+    # Check the type of the first element to decide the strategy
     first_mesh = meshes[0]
 
-    # --- Estratégia Trimesh ---
+    # --- Trimesh Strategy ---
     if isinstance(first_mesh, trimesh.Trimesh):
-        # trimesh.util.concatenate é super eficiente
+        # trimesh.util.concatenate is super efficient
         return trimesh.util.concatenate(meshes)
 
-    # --- Estratégia Open3D ---
+    # --- Open3D Strategy ---
     elif isinstance(first_mesh, o3d.geometry.TriangleMesh):
-        # Open3D usa soma de operadores para merge simples
+        # Open3D uses operator sum for simple merging
         merged = meshes[0]
         for mesh in meshes[1:]:
             merged += mesh
@@ -869,7 +869,7 @@ def merge_meshes(
         return merged
 
     else:
-        raise TypeError(f"Tipo de malha não suportado para merge: {type(first_mesh)}")
+        raise TypeError(f"Mesh type not supported for merge: {type(first_mesh)}")
 
 
 # --- Main Dispatch Functions ---
@@ -1154,3 +1154,85 @@ def create_wall_mesh(
     inner_mesh = trimesh.creation.box(extents=[inner_width, inner_height, depth])
 
     return outer_mesh.difference(inner_mesh)
+
+
+def extract_pca_directions(points: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Performs PCA (Principal Component Analysis) on a point cloud
+    to find the main variance directions (length and width).
+    """
+    from sklearn.decomposition import PCA
+
+    if len(points) < 3:
+        return np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+
+    pca = PCA(n_components=3)
+    pca.fit(points)
+    # Returns the first and second principal components
+    return pca.components_[0], pca.components_[1]
+
+
+def slice_and_get_polygon(
+    pcd: o3d.geometry.PointCloud,
+    center: np.ndarray,
+    normal: np.ndarray,
+    min_dist: float,
+    max_dist: float,
+    expansion: float = 0.001,
+) -> Polygon:
+    """
+    Combines 3D slicing, 2D projection, and OpenCV contour extraction in a single clean call.
+    """
+    # 1. 3D Slicing
+    pcd_slice, _ = select_points_between_planes(pcd, center, normal, min_dist, max_dist)
+    if len(pcd_slice.points) < 3:
+        return Polygon()
+
+    # 2. Transformation Matrix (World -> Local Plane)
+    # Aligns the Z-axis with the plane normal, centering at 'center'
+    R = get_rotation_matrix_between_vectors(np.array([0, 0, 1]), normal)
+    T_world_to_local = np.eye(4)
+    T_world_to_local[:3, :3] = R.T
+    T_world_to_local[:3, 3] = -R.T @ center
+
+    # 3. Project to Z=0
+    pcd_proj = project_points_to_plane(pcd_slice, T_world_to_local, normal)
+
+    # 4. Extract 2D Polygon (Uses OpenCV internally)
+    return get_plane_contour_polygon(pcd_proj, expansion_value=expansion)
+
+
+def extract_contour_segments(
+    poly: Polygon,
+) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[np.ndarray]]:
+    """
+    Given a Shapely polygon, extracts the lines that form the exterior (segments)
+    and calculates the 2D Normal vector (pointing outward) for each line.
+    """
+    from shapely.geometry import Polygon
+
+    if poly.is_empty or not isinstance(poly, Polygon):
+        return [], []
+
+    coords = list(poly.exterior.coords)
+    segments = []
+    normals = []
+
+    for i in range(len(coords) - 1):
+        p1 = np.array(coords[i])
+        p2 = np.array(coords[i + 1])
+        segments.append((p1, p2))
+
+        # Directional vector p1 -> p2
+        v = p2 - p1
+        length = np.linalg.norm(v)
+        if length == 0:
+            normals.append(np.array([0.0, 0.0]))
+            continue
+
+        # Outward-pointing normal. Since exterior rings in Shapely
+        # are Counter-Clockwise (CCW), the external normal is (v.y, -v.x)
+        n = np.array([v[1], -v[0]]) / length
+        normals.append(n)
+
+    return segments, normals

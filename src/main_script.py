@@ -114,20 +114,20 @@ contour_image_padding = 10
 
 # ********* image options ****************
 no_image = False
-essential_image_only = False
+essential_image_only = True
 no_skip = True
 
-show_all_planes_and_normals = True
+show_all_planes_and_normals = False
 show_planes_parallel_clustering = True
-show_plane_pairs = True
+show_plane_pairs = False
 show_plane_pair_and_proj_in_pcd = True
-show_proj_pts_p1 = True
-show_proj_pts_p2 = True
-show_proj_pts_p3 = True
-show_proj_pts_p4 = True
-show_proj_pts_p5 = True
-show_P2345_in_pcd = True
-show_each_P_in_pcd = True
+show_proj_pts_p1 = False
+show_proj_pts_p2 = False
+show_proj_pts_p3 = False
+show_proj_pts_p4 = False
+show_proj_pts_p5 = False
+show_P2345_in_pcd = False
+show_each_P_in_pcd = False
 show_plt_contour_P2_2d = True
 show_P2_contour_3d = True
 show_plt_all_tcp_grids = False
@@ -454,15 +454,18 @@ pcd_paths = [
     os.path.join(r"Test_part", "Verification_examples", "03_Board_Empty.pcd"),
 ]
 
-
+pcd_paths = [os.path.join("Test_part", "cracker_box", "clouds", "merged_cloud.ply")]
 pcd_assembly, points_assembly, colors_assembly, part_ids_assembly, pcd_parts_list = (
     merge_part_pcd(pcd_paths)
 )
-actual_pcd = load_point_cloud(
-    os.path.join(r"Test_part", "Verification_examples", "Scanned_pcd.pcd")
-)
+# actual_pcd = load_point_cloud(
+#     os.path.join(r"Test_part", "Verification_examples", "Scanned_pcd.pcd")
+# )
 
-actual_pcd.scale(0.001, np.array([0, 0, 0]))  # Scale
+actual_pcd = load_point_cloud(
+    os.path.join("Test_part", "cracker_box", "clouds", "merged_cloud.ply")
+)
+# actual_pcd.scale(0.001, np.array([0, 0, 0]))  # Scale
 
 voxel_size = 0.007  # voxel down radius, adjust regarding the dense of pcd
 
@@ -595,9 +598,7 @@ o3d.visualization.draw_geometries(
 original_points = np.asarray(pcd_target_in_scan.points)
 original_indices = np.arange(len(original_points))
 # ----------------  initialize parameters for plane extraction ----------------
-plane_indices_list = (
-    []
-)  # for each plane, the indices of its points in the original point cloud
+plane_indices_list = []  # for each plane, the indices of its points in the original point cloud
 plane_colors = []  # for each plane, its color
 plane_models = []  # for each plane, its model (ax+by+cz+d)
 plane_normals = []  # for each plane, its normal vector

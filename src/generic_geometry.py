@@ -571,3 +571,48 @@ class GenericGeometry:
         self.geometry.orient_normals_consistent_tangent_plane(k=15)
 
         print(f"[Clean] Points after cleaning: {len(self.geometry.points)}")
+
+    def scale(self, scale_factor: float, center: bool = False):
+        """
+        Escala a geometria proporcionalmente pelo fator fornecido.
+
+        Args:
+            scale_factor (float): O fator de multiplicação (ex: 0.001 para converter mm em m).
+            center (bool): Se True, escala em torno do centro de massa/centroide do objeto.
+                           Se False (padrão), escala em torno da origem (0,0,0) para manter o TCP fixo.
+        """
+        import numpy as np
+        import open3d as o3d
+        import trimesh
+
+        # 1. Determinar o ponto central de escala (center_pt)
+        if center:
+            if isinstance(self.geometry, o3d.geometry.Geometry3D):
+                center_pt = self.geometry.get_center()
+            elif isinstance(self.geometry, trimesh.Trimesh):
+                center_pt = self.geometry.centroid
+            else:
+                center_pt = np.array([0.0, 0.0, 0.0])
+        else:
+            center_pt = np.array([0.0, 0.0, 0.0])
+
+        # 2. Aplicar a escala de acordo com o motor geométrico
+        if isinstance(self.geometry, o3d.geometry.Geometry3D):
+            # O Open3D possui um método nativo que aceita o ponto central
+            self.geometry.scale(scale_factor, center=center_pt)
+
+        elif isinstance(self.geometry, trimesh.Trimesh):
+            # Para o Trimesh, construímos a matriz de transformação 4x4
+            # Equação matemática: p' = S*(p - C) + C  =>  p' = S*p + (C - S*C)
+            transform = np.eye(4)
+            transform[:3, :3] *= scale_factor
+            transform[:3, 3] = center_pt - (scale_factor * center_pt)
+
+            self.geometry.apply_transform(transform)
+
+        else:
+            raise TypeError(
+                f"Tipo de geometria não suportado para escala: {type(self.geometry)}"
+            )
+
+        return self  # Permite o encadeamento de métodos (ex: geom.scale(0.001).visualize())

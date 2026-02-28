@@ -116,7 +116,7 @@ class VacuumGraspSampler(
                 )
             )
 
-        # Força orientação consistente (resolve o problema da "meia-lua" na lata)
+        # Force consistent orientation (solves the "half-moon" problem in the can)
         # pcd.orient_normals_consistent_tangent_plane(k=15)
 
         # 1. Phase 1: Generation (Geometry + Collision)
@@ -687,7 +687,7 @@ class VacuumGraspSampler(
         self, pcd: o3d.geometry.PointCloud, candidate: GraspCandidate
     ):
         """
-        Força a avaliação de um único candidato com todas as flags de debug ativas.
+        Forces the evaluation of a single candidate with all debug flags active.
         """
 
         all_points = np.asarray(pcd.points)
@@ -695,57 +695,57 @@ class VacuumGraspSampler(
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
         com_xy, max_torque_arm = self._calculate_global_stats(pcd, all_points)
 
-        # 3. Executar avaliação (isso vai disparar os plots do Matplotlib)
-        print(f"--- Debugging Grasp em {candidate.contact_point} ---")
+        # 3. Execute evaluation (this will trigger Matplotlib plots)
+        print(f"--- Debugging Grasp at {candidate.contact_point} ---")
         self._evaluate_single_candidate(
             candidate, pcd_tree, all_points, all_normals, com_xy, max_torque_arm, True
         )
 
-        # 4. Mostrar o grasp em 3D para referência
+        # 4. Show the grasp in 3D for reference
         self.visualize_grasp(pcd, candidate, show_safety_volume=True)
 
 
 def debug_pad_projection(pad, local_points_3d, zone_dict):
     """
-    Visualiza a projeção 2D dos pontos no frame local da ventosa.
+    Visualizes the 2D projection of points in the suction cup's local frame.
     """
     plt.figure(figsize=(6, 6))
 
-    # 1. Plotar todos os pontos projetados (X, Y)
+    # 1. Plot all projected points (X, Y)
     plt.scatter(
         local_points_3d[:, 0],
         local_points_3d[:, 1],
         c="gray",
         s=1,
         alpha=0.5,
-        label="Todos os pontos",
+        label="All points",
     )
 
-    # 2. Destacar pontos por zona
+    # 2. Highlight points by zone
     colors = ["red", "green", "blue", "yellow"]
     for i, (zone_name, pts) in enumerate(zone_dict.items()):
         if len(pts) > 0:
-            plt.scatter(pts[:, 0], pts[:, 1], s=5, label=f"Zona: {zone_name}")
+            plt.scatter(pts[:, 0], pts[:, 1], s=5, label=f"Zone: {zone_name}")
 
-    # 3. Desenhar os limites físicos da ventosa (círculos)
+    # 3. Draw the physical limits of the suction cup (circles)
     theta = np.linspace(0, 2 * np.pi, 100)
-    # Círculo externo
+    # External circle
     plt.plot(
         pad.safety_radius * np.cos(theta),
         pad.safety_radius * np.sin(theta),
         "k--",
-        label="Raio Externo",
+        label="External Radius",
     )
-    # Se houver um raio interno (furo da ventosa)
+    # If there is an internal radius (suction cup hole)
     if hasattr(pad, "inner_radius"):
         plt.plot(
             pad.inner_radius * np.cos(theta),
             pad.inner_radius * np.sin(theta),
             "r:",
-            label="Furo Interno",
+            label="Internal Hole",
         )
 
-    plt.title(f"Debug Projeção: {pad.name}")
+    plt.title(f"Debug Projection: {pad.name}")
     plt.xlabel("Local X (m)")
     plt.ylabel("Local Y (m)")
     plt.axis("equal")

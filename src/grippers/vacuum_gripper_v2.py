@@ -1,4 +1,3 @@
-import copy
 import os
 import yaml
 import numpy as np
@@ -14,7 +13,6 @@ from src.grippers.pads import (
     BaseSuctionPad,
     CircularPad,
     CircularPadZones,
-    RectangularPad,
 )
 
 # Standard Colors

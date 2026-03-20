@@ -3,7 +3,7 @@ import trimesh.geometry
 import numpy as np
 import open3d as o3d
 from dataclasses import dataclass
-from typing import List, Optional, TypedDict
+from typing import List, TypedDict
 
 from src.grasping.base_sampler import BaseGraspSampler, GraspCandidate
 from src.grippers.vacuum_gripper import VacuumGripper

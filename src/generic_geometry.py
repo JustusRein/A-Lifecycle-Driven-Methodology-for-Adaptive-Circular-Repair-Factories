@@ -166,7 +166,13 @@ class GenericGeometry:
                     radius=0.01, max_nn=30
                 )
             )
-            pcd.orient_normals_consistent_tangent_plane(15)
+        pts = np.asarray(pcd.points)
+        cx, cy = np.mean(pts, axis=0)[:2]
+        max_z = np.max(pts[:, 2])
+        camera_z = max_z * 2.0 if max_z > 0 else max_z + 0.5
+        camera_pos = np.array([cx, cy, camera_z])
+        pcd.orient_normals_towards_camera_location(camera_pos)
+        # pcd.orient_normals_consistent_tangent_plane(15)
 
         print(f"Running Poisson reconstruction (depth={depth})...")
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
@@ -538,39 +544,55 @@ class GenericGeometry:
     def get_dimensions_report(self) -> DimensionsReport:
         return gu.analyze_object_dimensions(self.geometry)
 
-    def clean_point_cloud(self, nb_neighbors: int = 20, std_ratio: float = 2.0):
+    @inplace_result
+    def clean_point_cloud(
+        self,
+        nb_neighbors: int = 20,
+        std_ratio: float = 2.0,
+        voxel_size: float = 0.0,
+    ):
         """
-        Applies statistical cleaning and ensures normal consistency.
+        This represents the complete 'Preprocessing' pipeline for grasp sampling.
+        Applies voxel downsampling (if voxel_size > 0.0), statistical cleaning, and ensures normal consistency.
 
         Args:
+            voxel_size (float): Size of the voxel grid for downsampling.
+                                Set to 0.0 to skip downsampling.
             nb_neighbors (int): Number of neighbors to analyze for noise stats.
             std_ratio (float): Threshold. Lower is more aggressive.
         """
+        # 0. Ensure it is a Point Cloud
         self.to_point_cloud(inplace=True)
-        print(f"[Clean] Points before cleaning: {len(self.geometry.points)}")
+        print(f"[Clean] Points before processing: {len(self.geometry.points)}")
 
-        # 1. Statistical Outlier Removal
+        # 1. Voxel Downsampling (CRITICAL: Must happen BEFORE statistical removal)
+        # Standardizes point density and drastically speeds up the next algorithms
+        if voxel_size > 0.0:
+            self.geometry = self.geometry.voxel_down_sample(voxel_size=voxel_size)
+            print(f"[Clean] Points after Downsample: {len(self.geometry.points)}")
+
+        # 2. Statistical Outlier Removal
         # Removes "flying pixels" and sparse noise (dust) around the object.
         # It does NOT remove valid geometry like the back of the can.
         pcd_clean, ind = self.geometry.remove_statistical_outlier(
             nb_neighbors=nb_neighbors, std_ratio=std_ratio
         )
-        self.geometry = pcd_clean
 
-        # 2. Re-estimate Normals
+        # 3. Re-estimate Normals
         # Necessary because removing points invalidates the old KDTree/Normals.
         # Uses a Hybrid search (Radius + KNN) for robustness.
-        self.geometry.estimate_normals(
+        pcd_clean.estimate_normals(
             search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.01, max_nn=30)
         )
 
-        # 3. Consistent Normal Orientation
+        # 4. Consistent Normal Orientation
         # Instead of aligning to a camera (which flips the back), this method
         # propagates normal direction through the neighbor graph.
         # Result: All normals point OUTWARDS, regardless of where the camera was.
-        self.geometry.orient_normals_consistent_tangent_plane(k=15)
+        pcd_clean.orient_normals_consistent_tangent_plane(k=15)
 
-        print(f"[Clean] Points after cleaning: {len(self.geometry.points)}")
+        print(f"[Clean] Points after full cleaning: {len(self.geometry.points)}")
+        return pcd_clean
 
     def scale(self, scale_factor: float, center: bool = False):
         """

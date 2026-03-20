@@ -1,9 +1,7 @@
 import numpy as np
 from abc import ABC, abstractmethod
 from typing import Any, Optional
-import open3d as o3d
 import trimesh
-import copy
 
 # Adjust path to find core modules if necessary, or use relative imports
 # Assuming structure: project/grippers/ and project/core/

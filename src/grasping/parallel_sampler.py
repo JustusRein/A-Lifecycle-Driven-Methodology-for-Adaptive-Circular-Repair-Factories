@@ -2,13 +2,15 @@ import copy
 import numpy as np
 import open3d as o3d
 import cv2
-import itertools
+import random
+from math import acos, degrees
 from sklearn.decomposition import PCA
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Polygon
 from shapely.validation import make_valid
-from shapely.prepared import prep
+from shapely.ops import unary_union
+from shapely import set_precision
 from dataclasses import dataclass
-from typing import List, Tuple, TypedDict, Optional
+from typing import List, Tuple, TypedDict, Optional, Dict, Any
 
 from src.grasping.base_sampler import BaseGraspSampler, GraspCandidate
 from src.grippers.parallel_gripper import ParallelGripper
@@ -22,23 +24,42 @@ class ParallelScoreDetails(TypedDict):
 
 @dataclass
 class ParallelSamplerConfig:
+    # Parâmetros de tolerância e distâncias
     plane_angle_thresh: float = 5.0
-    min_score: float = 0.3
-    margin_points_between_planes: float = 0.0015
-    grid_spacing_edge: float = 0.004
-    grid_spacing_normal: float = 0.006
+    min_remaining_points: int = 50
+    min_points_per_plane: int = 50  # Usado como fallback se o cálculo dinâmico falhar
+    distance_threshold: float = 0.001  # 1mm em metros
+    max_planes: int = 200
+    margin_points_between_planes: float = 0.001
 
-    # Translation of Hanyu's parameters to Meters
-    ransac_distance_thresh: float = 0.001  # 1mm in Hanyu's script
-    merge_offset_thresh: float = 0.002  # 2mm in Hanyu's script
+    # Desenho e visualização
+    plt_graphic_padding: float = 0.01
+    contour_image_padding: int = 10
+
+    # Critério de sucesso
+    min_score: float = 0.3
+
+    # ==========================================
+    # Flags de Visualização (Para Debugging)
+    # ==========================================
+    no_image: bool = False
+    show_all_planes_and_normals: bool = True
+    show_planes_parallel_clustering: bool = True
+    show_plane_pairs: bool = True
+    show_plane_pair_and_proj_in_pcd: bool = True
+    show_proj_pts_p1: bool = True
+    show_proj_pts_p2: bool = True
+    show_proj_pts_p3: bool = True
+    show_proj_pts_p4: bool = True
+    show_proj_pts_p5: bool = True
 
 
 class ParallelGraspSampler(
     BaseGraspSampler[ParallelGripper, ParallelSamplerConfig, ParallelScoreDetails]
 ):
     """
-    Sampler for Parallel Grippers.
-    Strict 1:1 functional replica of the original main_script.py logic.
+    Sampler para Garras Paralelas.
+    Implementação estruturada, tipada e comentada da lógica original do main_script.py.
     """
 
     def __init__(
@@ -49,58 +70,447 @@ class ParallelGraspSampler(
         super().__init__(gripper, config)
 
     def sample_grasps(self, pcd: o3d.geometry.PointCloud) -> List[GraspCandidate]:
+        """
+        Método principal que coordena o pipeline de extração de pegas.
+        """
         self.clear_candidates()
-        print("[ParallelSampler] Step 1: Extracting, merging and pairing planes...")
+        cfg = self.config
+        g_cfg = self.gripper.config
 
-        # 1. Plane Segmentation & Merging (Exactly like main_script.py)
-        plane_models, plane_normals, plane_indices = self._extract_and_merge_planes(pcd)
-        if not plane_normals:
-            print("[ParallelSampler] No planes found.")
-            return []
+        # =================================================================
+        # CÁLCULO DINÂMICO DO MIN_POINTS_PER_PLANE
+        # =================================================================
+        distances = np.asarray(pcd.compute_nearest_neighbor_distance())
+        avg_dist = np.mean(distances) if len(distances) > 0 else 0.001
+        area_por_ponto = avg_dist**2
 
-        # 2. Parallel Grouping and Pairing (Exactly like main_script.py)
-        paired_planes = self._group_and_pair_planes(plane_normals)
-        print(f"[ParallelSampler] Found {len(paired_planes)} potential plane pairs.")
+        # Área física mínima (Área da ponta do dedo do Franka)
+        area_dedo = g_cfg.z_pg * g_cfg.b_pg
+        min_area_necessaria = area_dedo * 0.5
 
-        # 3. Evaluate each pair
-        for idx, (mmm, nnn) in enumerate(paired_planes):
-            print(f"  -> Processing pair {idx + 1}/{len(paired_planes)}...")
+        dynamic_min_points = int(min_area_necessaria / area_por_ponto)
+        dynamic_min_points = np.clip(dynamic_min_points, 50, len(pcd.points) // 10)
 
-            valid, center_ij, dir1, dir2, center_pca, poly_lists, contour_data = (
-                self._analyze_plane_pair(pcd, mmm, nnn, plane_normals, plane_indices)
+        print(f"🧠 [Auto-Tuning] Distância média: {avg_dist:.4f}m")
+        print(
+            f"🧠 [Auto-Tuning] Limite dinâmico definido para: {dynamic_min_points} pontos/plano"
+        )
+
+        # Variáveis derivadas da cinemática da garra
+        y_pg = max(
+            g_cfg.q_pg + 2 * g_cfg.r_pg,
+            g_cfg.h_pg + 2 * g_cfg.k_pg,
+            g_cfg.f_pg + 2 * (g_cfg.a_pg + g_cfg.v_pg),
+        )
+        rd = max(g_cfg.ra, g_cfg.rb)
+
+        # =================================================================
+        # 1. SEGMENTAÇÃO E FUSÃO DE PLANOS (A ESSÊNCIA DO SCRIPT ORIGINAL)
+        # =================================================================
+        print(
+            f"🚀 Iniciando extração de planos (Min pts/plano: {dynamic_min_points})..."
+        )
+        pcd_target = copy.deepcopy(pcd)
+        original_points = np.asarray(pcd_target.points)
+        original_indices = np.arange(len(original_points))
+
+        plane_indices_list: List[np.ndarray] = []
+        plane_colors: List[List[float]] = []
+        plane_models: List[np.ndarray] = []
+        plane_normals: List[np.ndarray] = []
+
+        rest_pcd = copy.deepcopy(pcd_target)
+
+        # 1.1 Extração Bruta (RANSAC Clássico)
+        for _ in range(cfg.max_planes):
+            if len(rest_pcd.points) < cfg.min_remaining_points:
+                break
+
+            try:
+                plane_model, inliers = rest_pcd.segment_plane(
+                    distance_threshold=cfg.distance_threshold,
+                    ransac_n=3,
+                    num_iterations=1000,
+                )
+            except RuntimeError:
+                break
+
+            # A ESSÊNCIA: Parar a extração assim que o plano encontrado for lixo/pequeno demais
+            if len(inliers) < dynamic_min_points:
+                break
+
+            original_idx = original_indices[inliers]
+            plane_indices_list.append(original_idx)
+
+            plane_models.append(np.asarray(plane_model))
+            normal_vector = np.asarray(plane_model[0:3])
+            plane_normals.append(normal_vector / np.linalg.norm(normal_vector))
+
+            plane_colors.append([random.random(), random.random(), random.random()])
+
+            # Atualiza a nuvem restante
+            rest_pcd = rest_pcd.select_by_index(inliers, invert=True)
+            original_indices = np.delete(original_indices, inliers)
+
+        print(f"   -> RANSAC extraiu {len(plane_models)} planos brutos.")
+
+        # 1.2 Fusão de Planos Coplanares
+        all_points_xyz = np.asarray(pcd_target.points)
+        plane_models, plane_normals, plane_indices_list = self._merge_coplanar_planes(
+            p_models=plane_models,
+            p_normals=plane_normals,
+            p_indices=plane_indices_list,
+            all_pts=all_points_xyz,
+            angle_thresh_deg=cfg.plane_angle_thresh,
+            offset_thresh=cfg.distance_threshold * 2,
+        )
+
+        print(
+            f"   -> Após a fusão, restam {len(plane_normals)} planos estruturais consolidados."
+        )
+
+        if cfg.show_all_planes_and_normals and not cfg.no_image:
+            colored_pcd = copy.deepcopy(pcd_target)
+            colors_vis = np.ones((len(original_points), 3)) * [0.5, 0.5, 0.5]
+            for indices, color in zip(plane_indices_list, plane_colors):
+                colors_vis[indices] = color
+            colored_pcd.colors = o3d.utility.Vector3dVector(colors_vis)
+            o3d.visualization.draw_geometries(
+                [colored_pcd], window_name="1. Plane Segmentation Result"
             )
-            if not valid:
+
+        # =================================================================
+        # 2. AGRUPAMENTO POR PARALELISMO
+        # =================================================================
+        parallel_groups = self._group_parallel_planes(
+            plane_normals, cfg.plane_angle_thresh
+        )
+
+        if cfg.show_planes_parallel_clustering and not cfg.no_image:
+            colored_pcd_groups = copy.deepcopy(pcd_target)
+            group_colors = [
+                [random.random(), random.random(), random.random()]
+                for _ in parallel_groups
+            ]
+            colors_groups = np.ones((len(pcd_target.points), 3)) * [0.5, 0.5, 0.5]
+            for group_idx, group in enumerate(parallel_groups):
+                for plane_idx in group:
+                    colors_groups[plane_indices_list[plane_idx]] = group_colors[
+                        group_idx
+                    ]
+            colored_pcd_groups.colors = o3d.utility.Vector3dVector(colors_groups)
+            o3d.visualization.draw_geometries(
+                [colored_pcd_groups], window_name="2. Parallel Clustering"
+            )
+
+        # Criar os Pares a partir dos Grupos
+        paired_planes: List[Tuple[int, int]] = []
+        for group in parallel_groups:
+            n = len(group)
+            for i in range(n):
+                for j in range(i + 1, n):
+                    paired_planes.append((group[i], group[j]))
+
+        # =================================================================
+        # 3. AVALIAÇÃO DE CADA PAR
+        # =================================================================
+        for count, (mmm, nnn) in enumerate(paired_planes):
+            print(
+                f"\n-------- Avaliando Par: {count + 1}/{len(paired_planes)} --------"
+            )
+
+            if cfg.show_plane_pairs and not cfg.no_image:
+                pair_colors = np.ones((len(pcd_target.points), 3)) * [0.6, 0.6, 0.6]
+                pair_col = [random.random(), random.random(), random.random()]
+                pair_colors[plane_indices_list[mmm]] = pair_col
+                pair_colors[plane_indices_list[nnn]] = pair_col
+                paired_pcd = copy.deepcopy(pcd_target)
+                paired_pcd.colors = o3d.utility.Vector3dVector(pair_colors)
+                o3d.visualization.draw_geometries(
+                    [paired_pcd], window_name=f"3. Pair {count + 1} Highlight"
+                )
+
+            plane_i_points = np.asarray(
+                pcd_target.select_by_index(plane_indices_list[mmm]).points
+            )
+            plane_j_points = np.asarray(
+                pcd_target.select_by_index(plane_indices_list[nnn]).points
+            )
+            center_i = np.mean(plane_i_points, axis=0)
+            center_j = np.mean(plane_j_points, axis=0)
+
+            # Restrição Cinemática
+            dist_plane = abs(np.dot(center_i - center_j, plane_normals[mmm]))
+            print(
+                f"Distância entre planos: {dist_plane:.4f}m | Abertura Máx: {(g_cfg.f_pg - 2 * g_cfg.w_pg):.4f}m"
+            )
+
+            if dist_plane < g_cfg.g_pg or dist_plane > (g_cfg.f_pg - 2 * g_cfg.w_pg):
+                print("Ignorado: Peça muito fina ou muito grossa para a garra.")
                 continue
 
-            segments_2d, normals_2d = contour_data
-            plane_normal_3d = plane_normals[mmm]
-
-            print("     Generating TCP grid...")
-            poses_3d, shapely_boxes = self._generate_tcp_candidates(
-                segments_2d, normals_2d, center_pca, dir1, dir2, plane_normal_3d
+            center_ij = (center_i + center_j) / 2
+            dist_dir_i = (
+                -1.0 if np.dot(center_ij - center_i, plane_normals[mmm]) > 0 else 1.0
+            )
+            dist_dir_j = (
+                -1.0 if np.dot(center_ij - center_j, plane_normals[nnn]) > 0 else 1.0
             )
 
-            print(f"     Testing {len(poses_3d)} poses for collisions...")
-            valid_poses, valid_areas = self._evaluate_collisions_2d(
-                poses_3d, shapely_boxes, poly_lists
+            dist_i = abs(np.dot((center_ij - center_i), plane_normals[mmm]))
+            dist_j = abs(np.dot((center_ij - center_j), plane_normals[nnn]))
+
+            projected_i_points = plane_i_points - dist_dir_i * np.outer(
+                dist_i, plane_normals[mmm]
+            )
+            projected_j_points = plane_j_points - dist_dir_j * np.outer(
+                dist_j, plane_normals[nnn]
             )
 
-            if valid_poses:
-                print(f"     ✅ {len(valid_poses)} poses survived collision checks.")
-                scores = self._calculate_scores(valid_poses, valid_areas, pcd)
+            pcd_proj_i = o3d.geometry.PointCloud(
+                o3d.utility.Vector3dVector(projected_i_points)
+            )
+            pcd_proj_j = o3d.geometry.PointCloud(
+                o3d.utility.Vector3dVector(projected_j_points)
+            )
 
-                for pose, score_tuple in zip(valid_poses, scores):
-                    final_score, area_score, center_score, area = score_tuple
+            pcd_orig_i = pcd_target.select_by_index(plane_indices_list[mmm])
+            pcd_orig_j = pcd_target.select_by_index(plane_indices_list[nnn])
 
-                    if final_score >= self.config.min_score:
+            if cfg.show_plane_pair_and_proj_in_pcd and not cfg.no_image:
+                o3d.visualization.draw_geometries(
+                    [pcd_orig_i, pcd_orig_j, pcd_proj_i, pcd_proj_j],
+                    window_name="4. Projeções no Centro",
+                )
+
+            # --- Camada P1 (Overlap) ---
+            overlap_pcd_unfilter = self._extract_overlap_region(pcd_proj_i, pcd_proj_j)
+            if overlap_pcd_unfilter is None:
+                continue
+
+            overlap_pcd, _ = overlap_pcd_unfilter.remove_statistical_outlier(
+                nb_neighbors=20, std_ratio=1.0
+            )
+            if cfg.show_proj_pts_p1 and not cfg.no_image:
+                o3d.visualization.draw_geometries(
+                    [overlap_pcd.translate([0, 0, 0.00001])],
+                    window_name="5. Camada P1 (Overlap)",
+                )
+
+            # --- Camada P2 (Corpo da Peça) ---
+            pts_btwn_p2, pts_beside = self._select_points_between_planes(
+                pcd_target,
+                center_i,
+                center_j,
+                plane_normals[mmm],
+                cfg.margin_points_between_planes,
+            )
+            proj_p2 = self._project_points_to_plane(
+                pts_btwn_p2, center_ij, plane_normals[mmm]
+            )
+            proj_pcd_p2, _ = o3d.geometry.PointCloud(
+                o3d.utility.Vector3dVector(proj_p2)
+            ).remove_statistical_outlier(20, 1.0)
+            if cfg.show_proj_pts_p2 and not cfg.no_image:
+                o3d.visualization.draw_geometries(
+                    [proj_pcd_p2], window_name="6. Camada P2"
+                )
+
+            # --- Camada P3 (Folga dos Dedos) ---
+            c_i_p3 = (
+                center_i
+                + (g_cfg.a_pg + g_cfg.w_pg + g_cfg.v_pg)
+                * plane_normals[mmm]
+                * dist_dir_i
+            )
+            c_j_p3 = (
+                center_j
+                + (g_cfg.a_pg + g_cfg.w_pg + g_cfg.v_pg)
+                * plane_normals[nnn]
+                * dist_dir_j
+            )
+            p3_i, pts_beside = self._select_points_between_planes(
+                pts_beside,
+                center_i,
+                c_i_p3,
+                plane_normals[mmm],
+                cfg.margin_points_between_planes,
+            )
+            p3_j, pts_beside = self._select_points_between_planes(
+                pts_beside,
+                center_j,
+                c_j_p3,
+                plane_normals[nnn],
+                cfg.margin_points_between_planes,
+            )
+            proj_p3 = self._project_points_to_plane(
+                np.vstack((p3_i, p3_j)), center_ij, plane_normals[mmm]
+            )
+            proj_pcd_p3, _ = o3d.geometry.PointCloud(
+                o3d.utility.Vector3dVector(proj_p3)
+            ).remove_statistical_outlier(50, 2.0)
+
+            # --- Camada P4 (Folga da Base) ---
+            c_i_p4 = center_ij + (y_pg / 2) * plane_normals[mmm] * dist_dir_i
+            c_j_p4 = center_ij + (y_pg / 2) * plane_normals[nnn] * dist_dir_j
+            p4_i, pts_beside = self._select_points_between_planes(
+                pts_beside,
+                c_i_p3,
+                c_i_p4,
+                plane_normals[mmm],
+                cfg.margin_points_between_planes,
+            )
+            p4_j, pts_beside = self._select_points_between_planes(
+                pts_beside,
+                c_j_p3,
+                c_j_p4,
+                plane_normals[nnn],
+                cfg.margin_points_between_planes,
+            )
+            proj_p4 = self._project_points_to_plane(
+                np.vstack((p4_i, p4_j)), center_ij, plane_normals[mmm]
+            )
+            proj_pcd_p4, _ = o3d.geometry.PointCloud(
+                o3d.utility.Vector3dVector(proj_p4)
+            ).remove_statistical_outlier(50, 3.0)
+
+            # --- Camada P5 (Folga do Braço) ---
+            c_i_p5 = center_ij + ((rd + g_cfg.rj) / 2) * plane_normals[mmm] * dist_dir_i
+            c_j_p5 = center_ij + ((rd + g_cfg.rj) / 2) * plane_normals[nnn] * dist_dir_j
+            p5_i, _ = self._select_points_between_planes(
+                pts_beside,
+                c_i_p4,
+                c_i_p5,
+                plane_normals[mmm],
+                cfg.margin_points_between_planes,
+            )
+            p5_j, _ = self._select_points_between_planes(
+                pts_beside,
+                c_j_p4,
+                c_j_p5,
+                plane_normals[nnn],
+                cfg.margin_points_between_planes,
+            )
+            proj_p5 = self._project_points_to_plane(
+                np.vstack((p5_i, p5_j)), center_ij, plane_normals[mmm]
+            )
+            proj_pcd_p5 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(proj_p5))
+
+            # --- Construção de Contornos OpenCV ---
+            pca = PCA(n_components=3)
+            pca.fit(np.asarray(pcd_target.points))
+            dir1, dir2, center_pca = pca.components_[0], pca.components_[1], pca.mean_
+
+            poly_p1, _, _ = self._get_plane_contour_polygon(
+                overlap_pcd, dir1, dir2, center_pca, is_p2=False
+            )
+            poly_p2, segments_2d_p2, normals_2d_p2 = self._get_plane_contour_polygon(
+                proj_pcd_p2, dir1, dir2, center_pca, is_p2=True
+            )
+            poly_p3, _, _ = self._get_plane_contour_polygon(
+                proj_pcd_p3, dir1, dir2, center_pca, is_p2=False
+            )
+            poly_p4, _, _ = self._get_plane_contour_polygon(
+                proj_pcd_p4, dir1, dir2, center_pca, is_p2=False
+            )
+            poly_p5, _, _ = self._get_plane_contour_polygon(
+                proj_pcd_p5, dir1, dir2, center_pca, is_p2=False
+            )
+
+            # --- Limpeza de Geometria ---
+            poly_lists = [
+                [self._clean_geom(p) for p in poly_p1],
+                [self._clean_geom(p) for p in poly_p2],
+                [self._clean_geom(p) for p in poly_p3],
+                [self._clean_geom(p) for p in poly_p4],
+                [self._clean_geom(p) for p in poly_p5],
+            ]
+
+            # --- Geração do Grid TCP e Avaliação ---
+            tcp_box, test_grid_points = self._generate_grid_by_spacing(
+                segments_2d_p2,
+                normals_2d_p2,
+                depth=g_cfg.b_pg + g_cfg.c_pg,
+                spacing_edge=g_cfg.z_pg / 5,
+                spacing_normal=g_cfg.b_pg / 5,
+            )
+
+            points_and_gripper_boxes = self._create_gripper_bounding_box(
+                test_grid_points, segments_2d_p2
+            )
+
+            min_area = 0.15 * (g_cfg.z_pg - 2 * g_cfg.rj) * (g_cfg.b_pg - 2 * g_cfg.rj)
+
+            for edge_idx, segment_shapes in enumerate(points_and_gripper_boxes):
+                pt1, pt2 = segments_2d_p2[edge_idx]
+                seg_dir = (pt2 - pt1) / np.linalg.norm(pt2 - pt1)
+                n_2d = np.array([-seg_dir[1], seg_dir[0]])
+
+                # Orientação baseada no referencial 2D original
+                x_axis = seg_dir[0] * dir1 + seg_dir[1] * dir2
+                x_axis = x_axis / np.linalg.norm(x_axis)
+                z_axis = n_2d[0] * dir1 + n_2d[1] * dir2
+                z_axis = z_axis / np.linalg.norm(z_axis)
+                y_axis = np.cross(z_axis, x_axis)
+                y_axis = y_axis / np.linalg.norm(y_axis)
+
+                R = np.column_stack((x_axis, y_axis, z_axis))
+
+                for shape in segment_shapes:
+                    pt = shape["point"]
+                    r = shape["rectangles"]
+
+                    rect1_geom, rect2_geom = Polygon(r[0]), Polygon(r[1])
+                    rect3_geom, rect4_geom = Polygon(r[2]), Polygon(r[3])
+                    rect5_geom = Polygon(r[4])
+
+                    area = sum(p.intersection(rect5_geom).area for p in poly_lists[0])
+                    if area <= min_area:
+                        continue
+                    if any(
+                        p.intersects(rect3_geom) or p.intersects(rect4_geom)
+                        for p in poly_lists[1]
+                    ):
+                        continue
+                    if any(
+                        p.intersects(rect1_geom) or p.intersects(rect2_geom)
+                        for p in poly_lists[2]
+                    ):
+                        continue
+                    if any(
+                        p.intersects(rect3_geom) or p.intersects(rect4_geom)
+                        for p in poly_lists[3]
+                    ):
+                        continue
+                    if any(p.intersects(rect4_geom) for p in poly_lists[4]):
+                        continue
+
+                    # Sucesso! Registar o candidato
+                    pt_3d = center_pca + pt[0] * dir1 + pt[1] * dir2
+                    pose_4x4 = np.eye(4)
+                    pose_4x4[:3, :3] = R
+                    pose_4x4[:3, 3] = pt_3d
+
+                    max_a = max(
+                        (g_cfg.z_pg - 2 * g_cfg.rj) * (g_cfg.b_pg - 2 * g_cfg.rj), 1e-9
+                    )
+                    s_area = np.clip((area - 0.15 * max_a) / (0.85 * max_a), 0.0, 1.0)
+                    dist_center = np.linalg.norm(
+                        pt_3d - np.mean(original_points, axis=0)
+                    )
+                    s_center = np.clip(1.0 - (dist_center / 1.0), 0.0, 1.0)
+
+                    final_score = 0.1 * s_center + 0.9 * s_area
+
+                    if final_score >= cfg.min_score:
                         cand = GraspCandidate(
-                            transform=pose,
+                            transform=pose_4x4,
                             score=final_score,
-                            contact_point=pose[:3, 3],
-                            approach_vector=-pose[:3, 2],  # Point INTO the object
+                            contact_point=pt_3d,
+                            approach_vector=-pose_4x4[:3, 2],
                             score_details={
-                                "area_score": area_score,
-                                "center_score": center_score,
+                                "area_score": s_area,
+                                "center_score": s_center,
                                 "total_area": area,
                             },
                         )
@@ -110,32 +520,40 @@ class ParallelGraspSampler(
             self.candidates, key=lambda x: x.score, reverse=True
         )
         print(
-            f"\n🏆 [ParallelSampler] Finished! Total valid grasps: {len(self.valid_candidates)}"
+            f"\n🏆 [ParallelSampler] Concluído! Total de pegas válidas: {len(self.valid_candidates)}"
         )
         return self.valid_candidates
 
     # =========================================================================
-    # Phase 1: Plane Extraction, Merging & Pairing (Hanyu's Exact Math)
+    # FUNÇÕES AUXILIARES DE MATEMÁTICA E GEOMETRIA
     # =========================================================================
-
     @staticmethod
-    def _normalize_plane(a, b, c, d):
+    def _normalize_plane(
+        a: float, b: float, c: float, d: float
+    ) -> Tuple[np.ndarray, float]:
+        """Garante que a normal do plano tem comprimento unitário."""
         n = np.array([a, b, c], dtype=float)
         norm = np.linalg.norm(n)
         if norm == 0:
-            raise ValueError("Invalid plane normal with zero length.")
+            raise ValueError("Normal do plano inválida (comprimento zero).")
         return n / norm, d / norm
 
     @staticmethod
-    def _angle_deg(n1, n2):
+    def _angle_deg(n1: np.ndarray, n2: np.ndarray) -> float:
+        """Calcula o ângulo em graus entre dois vetores normais."""
         cosv = float(np.clip(np.dot(n1, n2), -1.0, 1.0))
         return np.degrees(np.arccos(cosv))
 
     @staticmethod
-    def _refit_plane_from_points(points_xyz):
+    def _refit_plane_from_points(
+        points_xyz: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Ajusta um novo plano matemático a um conjunto de pontos 3D usando SVD."""
         P = np.asarray(points_xyz, dtype=float)
         if len(P) < 3:
-            raise ValueError("Need at least 3 points to fit a plane.")
+            raise ValueError(
+                "São necessários pelo menos 3 pontos para ajustar um plano."
+            )
         centroid = P.mean(axis=0)
         Q = P - centroid
         _, _, vt = np.linalg.svd(Q, full_matrices=False)
@@ -144,50 +562,22 @@ class ParallelGraspSampler(
         d = -np.dot(normal, centroid)
         return np.array([normal[0], normal[1], normal[2], d], dtype=float), normal
 
-    def _extract_and_merge_planes(self, pcd: o3d.geometry.PointCloud):
-        """Extracts planes with RANSAC and merges them using Hanyu's custom logic."""
-        working_pcd = copy.deepcopy(pcd)
-        original_points = np.asarray(pcd.points)
-        original_indices = np.arange(len(original_points))
-
-        plane_indices_list = []
-        plane_models = []
-        plane_normals = []
-
-        # 1. RANSAC Extraction
-        for _ in range(200):  # max_planes
-            if len(working_pcd.points) < 50:
-                break
-            try:
-                plane_model, inliers = working_pcd.segment_plane(
-                    distance_threshold=self.config.ransac_distance_thresh,
-                    ransac_n=3,
-                    num_iterations=1000,
-                )
-            except RuntimeError:
-                break
-
-            if len(inliers) < 50:
-                break
-
-            original_idx = original_indices[inliers]
-            plane_indices_list.append(original_idx)
-            plane_models.append(plane_model)
-
-            n = np.asarray(plane_model[0:3])
-            plane_normals.append(n / np.linalg.norm(n))
-
-            working_pcd = working_pcd.select_by_index(inliers, invert=True)
-            original_indices = np.delete(original_indices, inliers)
-
-        # 2. Hanyu's Merging Logic
-        planes = []
-        for model, n_unit, idxs in zip(plane_models, plane_normals, plane_indices_list):
-            a, b, c, d = model
+    def _merge_coplanar_planes(
+        self,
+        p_models: List[np.ndarray],
+        p_normals: List[np.ndarray],
+        p_indices: List[np.ndarray],
+        all_pts: np.ndarray,
+        angle_thresh_deg: float,
+        offset_thresh: float,
+    ) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
+        """Funde múltiplos pequenos planos do RANSAC em superfícies contínuas maiores."""
+        planes: List[Dict[str, Any]] = []
+        for m, n_unit, idxs in zip(p_models, p_normals, p_indices):
+            a, b, c, d = m
             n_hat, d_hat = self._normalize_plane(a, b, c, d)
             if np.dot(n_hat, n_unit) < 0:
-                n_hat = -n_hat
-                d_hat = -d_hat
+                n_hat, d_hat = -n_hat, -d_hat
             planes.append({"n": n_hat, "d": d_hat, "idxs": np.asarray(idxs, dtype=int)})
 
         changed = True
@@ -196,25 +586,17 @@ class ParallelGraspSampler(
             N = len(planes)
             if N <= 1:
                 break
-
             merged_pair = None
+
             for i in range(N):
                 for j in range(i + 1, N):
                     n1, d1 = planes[i]["n"], planes[i]["d"]
                     n2, d2 = planes[j]["n"], planes[j]["d"]
-
-                    if np.dot(n1, n2) < 0:
-                        n2_cmp = -n2
-                        d2_cmp = -d2
-                    else:
-                        n2_cmp, d2_cmp = n2, d2
-
-                    angle = self._angle_deg(n1, n2_cmp)
-                    offset_diff = abs(d1 - d2_cmp)
+                    n2_cmp, d2_cmp = (-n2, -d2) if np.dot(n1, n2) < 0 else (n2, d2)
 
                     if (
-                        angle <= self.config.plane_angle_thresh
-                        and offset_diff <= self.config.merge_offset_thresh
+                        self._angle_deg(n1, n2_cmp) <= angle_thresh_deg
+                        and abs(d1 - d2_cmp) <= offset_thresh
                     ):
                         merged_pair = (i, j)
                         break
@@ -226,190 +608,75 @@ class ParallelGraspSampler(
                 idxs_merged = np.unique(
                     np.concatenate([planes[i]["idxs"], planes[j]["idxs"]], axis=0)
                 )
-                pts = original_points[idxs_merged]
+                pts = all_pts[idxs_merged]
                 model_new, n_new = self._refit_plane_from_points(pts)
                 n_hat, d_hat = self._normalize_plane(*model_new)
 
                 if np.dot(n_hat, planes[i]["n"]) < 0:
-                    n_hat = -n_hat
-                    d_hat = -d_hat
+                    n_hat, d_hat = -n_hat, -d_hat
                 planes[i] = {"n": n_hat, "d": d_hat, "idxs": idxs_merged}
                 del planes[j]
                 changed = True
 
-        new_plane_models = [
+        res_models = [
             np.array([pl["n"][0], pl["n"][1], pl["n"][2], pl["d"]], dtype=float)
             for pl in planes
         ]
-        new_normals = [pl["n"] for pl in planes]
-        new_indices_list = [pl["idxs"] for pl in planes]
+        res_normals = [pl["n"] for pl in planes]
+        res_indices = [pl["idxs"] for pl in planes]
+        return res_models, res_normals, res_indices
 
-        return new_plane_models, new_normals, new_indices_list
+    def _group_parallel_planes(
+        self, plane_normals: List[np.ndarray], angle_thresh_deg: float
+    ) -> List[List[int]]:
+        """
+        Agrupa os índices dos planos que são paralelos entre si.
+        A ordem importa: O plano de referência deve ser sempre o maior (índice 0 da lista).
+        """
+        unclustered = list(range(len(plane_normals)))
+        parallel_groups: List[List[int]] = []
 
-    def _group_and_pair_planes(self, plane_normals):
-        """Replicates the parallel_groups logic from main_script.py"""
-        unclustered = set(range(len(plane_normals)))
-        parallel_groups = []
+        while len(unclustered) > 0:
+            ref_idx = unclustered[0]
+            current_group = [ref_idx]
+            unclustered.pop(0)
 
-        while unclustered:
-            idx = unclustered.pop()
-            ref_normal = plane_normals[idx]
-            current_group = [idx]
+            ref_normal = plane_normals[ref_idx]
             to_remove = []
 
             for other in unclustered:
                 cos_theta = np.clip(np.dot(ref_normal, plane_normals[other]), -1.0, 1.0)
-                angle = np.degrees(np.arccos(abs(cos_theta)))
-                if angle <= self.config.plane_angle_thresh:
+                if degrees(acos(abs(cos_theta))) <= angle_thresh_deg:
                     current_group.append(other)
                     to_remove.append(other)
 
             for i in to_remove:
                 unclustered.remove(i)
+
             parallel_groups.append(current_group)
 
-        paired_planes = []
-        for group in parallel_groups:
-            n = len(group)
-            for i in range(n):
-                for j in range(i + 1, n):
-                    paired_planes.append((group[i], group[j]))
+        return parallel_groups
 
-        return paired_planes
-
-    # =========================================================================
-    # Phase 2: Layer Extraction & OpenCV
-    # =========================================================================
-    def _analyze_plane_pair(self, pcd, mmm, nnn, plane_normals, plane_indices_list):
-        c = self.gripper.config
-
-        plane_i_points = np.asarray(pcd.select_by_index(plane_indices_list[mmm]).points)
-        plane_j_points = np.asarray(pcd.select_by_index(plane_indices_list[nnn]).points)
-        center_i = np.mean(plane_i_points, axis=0)
-        center_j = np.mean(plane_j_points, axis=0)
-
-        normal_i = plane_normals[mmm]
-        normal_j = plane_normals[nnn]
-
-        dist_plane = abs(np.dot(center_i - center_j, normal_i))
-        if dist_plane < c.g_pg or dist_plane > (c.f_pg - 2 * c.w_pg):
-            return False, None, None, None, None, None, None
-
-        center_ij = (center_i + center_j) / 2
-
-        dist_dir_i = -1.0 if np.dot(center_ij - center_i, normal_i) > 0 else 1.0
-        dist_dir_j = -1.0 if np.dot(center_ij - center_j, normal_j) > 0 else 1.0
-
-        pca = PCA(n_components=3)
-        pca.fit(np.asarray(pcd.points))
-        dir1, dir2 = pca.components_[0], pca.components_[1]
-        center_pca = pca.mean_
-
-        margin = self.config.margin_points_between_planes
-
-        # --- 1. Layer P1 (Overlap) ---
-        dist_i = abs(np.dot((center_ij - center_i), normal_i))
-        dist_j = abs(np.dot((center_ij - center_j), normal_j))
-
-        proj_i = plane_i_points - dist_dir_i * np.outer(dist_i, normal_i)
-        proj_j = plane_j_points - dist_dir_j * np.outer(dist_j, normal_j)
-
-        pcd_proj_i = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(proj_i))
-        pcd_proj_j = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(proj_j))
-        overlap_pcd = self._extract_overlap_region(pcd_proj_i, pcd_proj_j)
-
-        if overlap_pcd is None:
-            return False, None, None, None, None, None, None
-
-        # --- 2. Layer P2 (Between Planes) ---
-        pts_between_p2, pts_beside = self._select_points_between_planes(
-            pcd, center_i, center_j, normal_i, margin
-        )
-        proj_p2 = self._project_to_plane(pts_between_p2, center_ij, normal_i)
-        pcd_p2, _ = proj_p2.remove_statistical_outlier(20, 1.0)
-
-        # --- 3. Layer P3 (Finger Clearance) ---
-        c_i_p3 = center_i + (c.a_pg + c.w_pg + c.v_pg) * normal_i * dist_dir_i
-        c_j_p3 = center_j + (c.a_pg + c.w_pg + c.v_pg) * normal_j * dist_dir_j
-        pts_p3_i, pts_beside = self._select_points_between_planes(
-            pts_beside, center_i, c_i_p3, normal_i, margin
-        )
-        pts_p3_j, pts_beside = self._select_points_between_planes(
-            pts_beside, center_j, c_j_p3, normal_j, margin
-        )
-        proj_p3 = self._project_to_plane(
-            np.vstack((pts_p3_i, pts_p3_j)), center_ij, normal_i
-        )
-        pcd_p3, _ = proj_p3.remove_statistical_outlier(50, 2.0)
-
-        # --- 4. Layer P4 (Base Clearance) ---
-        y_pg = max(
-            c.q_pg + 2 * c.r_pg, c.h_pg + 2 * c.k_pg, c.f_pg + 2 * (c.a_pg + c.v_pg)
-        )
-        c_i_p4 = center_ij + (y_pg / 2) * normal_i * dist_dir_i
-        c_j_p4 = center_ij + (y_pg / 2) * normal_j * dist_dir_j
-        pts_p4_i, pts_beside = self._select_points_between_planes(
-            pts_beside, c_i_p3, c_i_p4, normal_i, margin
-        )
-        pts_p4_j, pts_beside = self._select_points_between_planes(
-            pts_beside, c_j_p3, c_j_p4, normal_j, margin
-        )
-        proj_p4 = self._project_to_plane(
-            np.vstack((pts_p4_i, pts_p4_j)), center_ij, normal_i
-        )
-        pcd_p4, _ = proj_p4.remove_statistical_outlier(50, 3.0)
-
-        # --- 5. Layer P5 (Arm Clearance) ---
-        rd = max(c.ra, c.rb)
-        c_i_p5 = center_ij + ((rd + c.rj) / 2) * normal_i * dist_dir_i
-        c_j_p5 = center_ij + ((rd + c.rj) / 2) * normal_j * dist_dir_j
-        pts_p5_i, _ = self._select_points_between_planes(
-            pts_beside, c_i_p4, c_i_p5, normal_i, margin
-        )
-        pts_p5_j, _ = self._select_points_between_planes(
-            pts_beside, c_j_p4, c_j_p5, normal_j, margin
-        )
-        proj_p5 = self._project_to_plane(
-            np.vstack((pts_p5_i, pts_p5_j)), center_ij, normal_i
-        )
-
-        # Build 2D Polygons via OpenCV
-        poly_p1 = self._get_plane_contour_polygon_pca(
-            overlap_pcd, dir1, dir2, center_pca
-        )
-        poly_p2 = self._get_plane_contour_polygon_pca(pcd_p2, dir1, dir2, center_pca)
-        poly_p3 = self._get_plane_contour_polygon_pca(pcd_p3, dir1, dir2, center_pca)
-        poly_p4 = self._get_plane_contour_polygon_pca(pcd_p4, dir1, dir2, center_pca)
-        poly_p5 = self._get_plane_contour_polygon_pca(proj_p5, dir1, dir2, center_pca)
-
-        poly_lists = [
-            [self._clean_geom(p) for p in poly_p1],
-            [self._clean_geom(p) for p in poly_p2],
-            [self._clean_geom(p) for p in poly_p3],
-            [self._clean_geom(p) for p in poly_p4],
-            [self._clean_geom(p) for p in poly_p5],
-        ]
-
-        segments, normals = self._extract_contour_segments(poly_p2)
-
-        return True, center_ij, dir1, dir2, center_pca, poly_lists, (segments, normals)
-
-    def _extract_overlap_region(self, proj_A, proj_B):
+    def _extract_overlap_region(
+        self, proj_A: o3d.geometry.PointCloud, proj_B: o3d.geometry.PointCloud
+    ) -> Optional[o3d.geometry.PointCloud]:
+        """Extrai a região 3D onde os dois planos projetados se sobrepõem."""
         if len(proj_A.points) == 0 or len(proj_B.points) == 0:
             return None
 
         dA = np.asarray(proj_A.compute_nearest_neighbor_distance())
         dB = np.asarray(proj_B.compute_nearest_neighbor_distance())
-        threshold = 1.2 * max(
-            np.median(dA) if len(dA) > 0 else 0, np.median(dB) if len(dB) > 0 else 0
-        )
-        if threshold == 0:
-            threshold = 0.001
+        med_A = np.median(dA) if len(dA) > 0 else 0
+        med_B = np.median(dB) if len(dB) > 0 else 0
+
+        th = 1.2 * max(med_A, med_B)
+        if th == 0:
+            th = 0.001
 
         kdtree_A = o3d.geometry.KDTreeFlann(proj_A)
         matched_B = []
         for p in np.asarray(proj_B.points):
-            k, _, _ = kdtree_A.search_radius_vector_3d(p, threshold)
+            k, _, _ = kdtree_A.search_radius_vector_3d(p, th)
             if k > 0:
                 matched_B.append(p)
 
@@ -417,52 +684,71 @@ class ParallelGraspSampler(
             return None
         return o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.array(matched_B)))
 
-    def _select_points_between_planes(self, pts, center_a, center_b, normal, margin):
-        if isinstance(pts, o3d.geometry.PointCloud):
-            pts = np.asarray(pts.points)
-        if len(pts) == 0:
-            return np.empty((0, 3)), np.empty((0, 3))
-        d_a = np.dot(pts - center_a, normal)
-        d_b = np.dot(pts - center_b, normal)
-        mask = (d_a * d_b <= 0) | (np.abs(d_a) <= margin) | (np.abs(d_b) <= margin)
-        return pts[mask], pts[~mask]
-
-    def _project_to_plane(self, points, plane_point, plane_normal):
+    def _select_points_between_planes(
+        self,
+        pcd_pts: Any,
+        center_a: np.ndarray,
+        center_b: np.ndarray,
+        normal: np.ndarray,
+        margin: float,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Filtra pontos que estão localizados fisicamente entre duas fatias planas."""
+        points = (
+            np.asarray(pcd_pts.points)
+            if isinstance(pcd_pts, o3d.geometry.PointCloud)
+            else pcd_pts
+        )
         if len(points) == 0:
-            return o3d.geometry.PointCloud()
+            return np.empty((0, 3)), np.empty((0, 3))
+
+        d_a = np.dot(points - center_a, normal)
+        d_b = np.dot(points - center_b, normal)
+        mask = (d_a * d_b <= 0) | (np.abs(d_a) <= margin) | (np.abs(d_b) <= margin)
+
+        return points[mask], points[~mask]
+
+    def _project_points_to_plane(
+        self, points: np.ndarray, plane_point: np.ndarray, plane_normal: np.ndarray
+    ) -> np.ndarray:
+        """Projeta um array de pontos 3D contra uma superfície plana matemática."""
+        if len(points) == 0:
+            return np.empty((0, 3))
         v = points - plane_point
         d = np.dot(v, plane_normal)
-        proj = points - np.outer(d, plane_normal)
-        return o3d.geometry.PointCloud(o3d.utility.Vector3dVector(proj))
+        return points - np.outer(d, plane_normal)
 
-    def _get_plane_contour_polygon_pca(self, pcd, dir1, dir2, center):
-        if pcd is None or pcd.is_empty():
-            return [Polygon()]
+    def _get_plane_contour_polygon(
+        self,
+        p_cloud: o3d.geometry.PointCloud,
+        d1: np.ndarray,
+        d2: np.ndarray,
+        ctr: np.ndarray,
+        is_p2: bool = False,
+    ) -> Tuple[List[Polygon], List[np.ndarray], List[np.ndarray]]:
+        """Gera polígonos 2D (Shapely) a partir da nuvem de pontos projetada usando OpenCV."""
+        if p_cloud.is_empty() or len(p_cloud.points) <= 50:
+            return [Polygon()], [], []
 
-        points = np.asarray(pcd.points)
-        if len(points) < 3:
-            return [Polygon()]
+        pts = np.asarray(p_cloud.points)
+        pts_2d = np.dot(pts - ctr, np.vstack([d1, d2]).T)
+        min_pt, max_pt = pts_2d.min(axis=0), pts_2d.max(axis=0)
 
-        pts_2d = np.dot(points - center, np.vstack([dir1, dir2]).T)
-        min_pt = pts_2d.min(axis=0)
-        max_pt = pts_2d.max(axis=0)
         ranges = max_pt - min_pt
-
         if np.max(ranges) == 0:
-            return [Polygon()]
+            return [Polygon()], [], []
 
         scale = 512.0 / np.max(ranges)
-        padding = 10
-        pts_img = np.int32((pts_2d - min_pt) * scale) + padding
-        img_size = ((max_pt - min_pt) * scale).astype(int) + 2 * padding
+        pad = self.config.contour_image_padding
+
+        pts_img = np.int32((pts_2d - min_pt) * scale) + pad
+        img_size = ((max_pt - min_pt) * scale).astype(int) + 2 * pad
 
         img = np.zeros((img_size[1], img_size[0]), dtype=np.uint8)
-        for pt in pts_img:
-            cv2.circle(img, tuple(pt), 1, 255, -1)
+        for p in pts_img:
+            cv2.circle(img, tuple(p), 1, 255, -1)
 
         px_gap = 3
-        k = max(3, int(round(px_gap * 2)))
-        k_open = max(3, int(round(px_gap * 0.8)))
+        k, k_open = max(3, int(round(px_gap * 2))), max(3, int(round(px_gap * 0.8)))
         kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
         kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_open, k_open))
 
@@ -472,51 +758,190 @@ class ParallelGraspSampler(
         ff = cv2.copyMakeBorder(mask, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
         cv2.floodFill(ff, None, (0, 0), 255)
         ff = ff[1:-1, 1:-1]
-        holes = cv2.bitwise_not(ff) & cv2.bitwise_not(mask)
-        filled = cv2.bitwise_or(mask, cv2.bitwise_not(holes))
+        filled = cv2.bitwise_or(
+            mask, cv2.bitwise_not(cv2.bitwise_not(ff) & cv2.bitwise_not(mask))
+        )
 
         num, labels, stats, _ = cv2.connectedComponentsWithStats(filled, connectivity=8)
-        min_area_px = (k * k) * 2
         clean = np.zeros_like(filled)
-        for i in range(1, num):
-            if stats[i, cv2.CC_STAT_AREA] >= min_area_px:
-                clean[labels == i] = 255
+        for ix in range(1, num):
+            if stats[ix, cv2.CC_STAT_AREA] >= (k * k) * 2:
+                clean[labels == ix] = 255
 
         contours, _ = cv2.findContours(
             clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
-        polygons = []
+        polys, segments_2d, normals_2d = [], [], []
         for cnt in contours:
-            epsilon = 0.01 * cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, epsilon, True).reshape(-1, 2)
-            pts_2d_back = (approx.astype(np.float32) - padding) / scale + min_pt
+            eps = 0.01 * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, eps, True).reshape(-1, 2)
+            pts_2d_back = (approx.astype(np.float32) - pad) / scale + min_pt
             if len(pts_2d_back) >= 3:
-                polygons.append(Polygon(pts_2d_back))
+                polys.append(Polygon(pts_2d_back))
 
-        return polygons if polygons else [Polygon()]
-
-    def _extract_contour_segments(self, polys):
-        segments = []
-        normals = []
-        for poly in polys:
-            if poly.is_empty:
-                continue
-            coords = list(poly.exterior.coords)
-            for i in range(len(coords) - 1):
-                p1 = np.array(coords[i])
-                p2 = np.array(coords[i + 1])
-                segments.append([p1, p2])
-                vec = p2 - p1
-                L = np.linalg.norm(vec)
-                if L == 0:
-                    normals.append(np.array([0, 0]))
-                else:
+            if is_p2:
+                for ix in range(len(pts_2d_back)):
+                    pt1_2d = pts_2d_back[ix]
+                    pt2_2d = pts_2d_back[(ix + 1) % len(pts_2d_back)]
+                    vec = pt2_2d - pt1_2d
+                    L = np.linalg.norm(vec)
+                    if L == 0:
+                        continue
                     dir_u = vec / L
-                    normals.append(np.array([-dir_u[1], dir_u[0]]))
-        return segments, normals
+                    segments_2d.append([pt1_2d, pt2_2d])
+                    normals_2d.append(np.array([-dir_u[1], dir_u[0]]))
 
-    def _clean_geom(self, geom):
+        return (polys if polys else [Polygon()]), segments_2d, normals_2d
+
+    def _generate_grid_by_spacing(
+        self,
+        segments_2d: List[List[np.ndarray]],
+        normals_2d: List[np.ndarray],
+        depth: float,
+        spacing_edge: float,
+        spacing_normal: float,
+    ) -> Tuple[List[List[np.ndarray]], List[np.ndarray]]:
+        """Gera pontos candidatos a TCP baseados no contorno externo e na profundidade dos dedos."""
+        rectangles, all_grid_points = [], []
+        eps = 1e-9
+        for (pt1, pt2), n in zip(segments_2d, normals_2d):
+            pt1, pt2, n = np.array(pt1), np.array(pt2), np.array(n) / np.linalg.norm(n)
+            vec = pt2 - pt1
+            seg_len = np.linalg.norm(vec)
+            dir_unit = vec / seg_len
+            num_w = int(np.floor((seg_len - eps) / spacing_edge) + 1)
+            start_w = (seg_len - (num_w - 1) * spacing_edge) / 2.0
+            num_d = int(np.floor((depth - eps) / spacing_normal) + 1)
+            start_d = (depth - (num_d - 1) * spacing_normal) / 2.0
+
+            if num_w < 1 or num_d < 1:
+                continue
+
+            offset = -n * depth
+            rectangles.append([pt1 + offset, pt2 + offset, pt2, pt1])
+
+            grid_pts = []
+            for iw in range(num_w):
+                for jw in range(num_d):
+                    pt = (
+                        (pt1 + offset)
+                        + dir_unit * (iw * spacing_edge + start_w)
+                        + n * (jw * spacing_normal + start_d)
+                    )
+                    grid_pts.append(pt)
+            all_grid_points.append(np.array(grid_pts))
+
+        return rectangles, all_grid_points
+
+    def _create_gripper_bounding_box(
+        self, grid_points: List[np.ndarray], segments_2d: List[List[np.ndarray]]
+    ) -> List[List[Dict[str, Any]]]:
+        """Cria as 6 caixas retangulares paramétricas que representam o braço do robô em 2D."""
+        all_shapes = []
+        g_cfg = self.gripper.config
+
+        for pts, (pt1, pt2) in zip(grid_points, segments_2d):
+            seg_dir = (pt2 - pt1) / np.linalg.norm(pt2 - pt1)
+            normal = np.array([-seg_dir[1], seg_dir[0]])
+            mid = (pt1 + pt2) / 2
+
+            segment_shapes = []
+            for pt in pts:
+                grid_edge_distance = np.dot(mid - pt, normal)
+                rects = []
+
+                # 1. P1: Espaço seguro frontal dos dedos
+                c1 = pt - normal * (g_cfg.x_pg + g_cfg.rj)
+                hw = (g_cfg.e_pg + 2 * (g_cfg.i_pg + g_cfg.rj)) / 2
+                rects.append(
+                    [
+                        c1 + seg_dir * hw,
+                        c1 + seg_dir * hw + normal * (g_cfg.x_pg + g_cfg.rj),
+                        c1 - seg_dir * hw + normal * (g_cfg.x_pg + g_cfg.rj),
+                        c1 - seg_dir * hw,
+                    ]
+                )
+
+                # 2. P2: Comprimento e zona de toque dos dedos
+                c2 = pt
+                rects.append(
+                    [
+                        c2 + seg_dir * hw,
+                        c2
+                        + seg_dir * hw
+                        + normal * (g_cfg.b_pg + g_cfg.c_pg + g_cfg.rj),
+                        c2
+                        - seg_dir * hw
+                        + normal * (g_cfg.b_pg + g_cfg.c_pg + g_cfg.rj),
+                        c2 - seg_dir * hw,
+                    ]
+                )
+
+                # 3. P3: Base inferior do Gripper
+                c3 = c2 + normal * (g_cfg.b_pg + g_cfg.c_pg + g_cfg.rj)
+                hb = (
+                    max(
+                        g_cfg.l_pg + 2 * g_cfg.m_pg,
+                        g_cfg.o_pg + 2 * g_cfg.p_pg,
+                        g_cfg.e_pg + 2 * g_cfg.i_pg,
+                    )
+                    + 2 * g_cfg.rj
+                ) / 2
+                hth = g_cfg.d_pg + g_cfg.t_pg + g_cfg.u_pg + g_cfg.rj
+                rects.append(
+                    [
+                        c3 + seg_dir * hb,
+                        c3 + seg_dir * hb + normal * hth,
+                        c3 - seg_dir * hb + normal * hth,
+                        c3 - seg_dir * hb,
+                    ]
+                )
+
+                # 4. P4: Base superior e braço principal do Robô
+                c4 = c3 + normal * hth
+                ha = (max(g_cfg.ra, g_cfg.rb) + g_cfg.re + 2 * g_cfg.rj) / 2
+                hta = g_cfg.rc + g_cfg.rf + 2 * g_cfg.rj
+                rects.append(
+                    [
+                        c4 + seg_dir * ha,
+                        c4 - seg_dir * ha,
+                        c4 - seg_dir * ha + normal * hta,
+                        c4 + seg_dir * ha + normal * hta,
+                    ]
+                )
+
+                # 5. P5: Área livre interna do Gripper
+                c5 = pt
+                harea = (g_cfg.z_pg - 2 * g_cfg.rj) / 2
+                htarea = g_cfg.b_pg - 2 * g_cfg.rj
+                rects.append(
+                    [
+                        c5 + seg_dir * harea,
+                        c5 + seg_dir * harea + normal * htarea,
+                        c5 - seg_dir * harea + normal * htarea,
+                        c5 - seg_dir * harea,
+                    ]
+                )
+
+                # 6. P6: Espaço retrocedente (Safety Back Space)
+                c6 = c4 + normal * hta
+                htb = grid_edge_distance + g_cfg.x_pg + g_cfg.rj
+                rects.append(
+                    [
+                        c6 + seg_dir * ha,
+                        c6 + seg_dir * ha + normal * htb,
+                        c6 - seg_dir * ha + normal * htb,
+                        c6 - seg_dir * ha,
+                    ]
+                )
+
+                segment_shapes.append({"point": pt, "rectangles": rects})
+            all_shapes.append(segment_shapes)
+        return all_shapes
+
+    def _clean_geom(self, geom: Any) -> Any:
+        """Repara e simplifica polígonos inválidos (ex: laços e auto-intersecções) para o Shapely."""
         if geom.is_empty:
             return geom
         g = geom
@@ -524,200 +949,13 @@ class ParallelGraspSampler(
             g = make_valid(g)
         if not g.is_valid:
             g = g.buffer(0)
+        try:
+            g = set_precision(g, 1e-9)
+        except:
+            pass
+        try:
+            if hasattr(g, "geoms"):
+                g = unary_union(g)
+        except:
+            pass
         return g
-
-    # =========================================================================
-    # Phase 3 & 4: Grid, Boxes, and Collision
-    # =========================================================================
-    def _generate_tcp_candidates(
-        self, segments_2d, normals_2d, center_pca, dir1, dir2, plane_normal_3d
-    ):
-        c = self.gripper.config
-        depth = c.b_pg + c.c_pg
-        spacing_edge = self.config.grid_spacing_edge
-        spacing_normal = self.config.grid_spacing_normal
-
-        poses_3d = []
-        shapely_boxes = []
-
-        for (pt1, pt2), n_2d in zip(segments_2d, normals_2d):
-            pt1, pt2 = np.array(pt1), np.array(pt2)
-            n_2d = np.array(n_2d) / np.linalg.norm(n_2d)
-
-            dir_vec = pt2 - pt1
-            seg_len = np.linalg.norm(dir_vec)
-            if seg_len == 0:
-                continue
-            seg_dir = dir_vec / seg_len
-
-            num_w = int(np.floor((seg_len - 1e-9) / spacing_edge) + 1)
-            start_w = (seg_len - (num_w - 1) * spacing_edge) / 2.0
-            num_d = int(np.floor((depth - 1e-9) / spacing_normal) + 1)
-            start_d = (depth - (num_d - 1) * spacing_normal) / 2.0
-
-            offset = -n_2d * depth
-            p1 = pt1 + offset
-            mid_segment = (pt1 + pt2) / 2.0
-
-            for i in range(num_w):
-                for j in range(num_d):
-                    alpha = i * spacing_edge + start_w
-                    beta = j * spacing_normal + start_d
-                    pt_2d = p1 + seg_dir * alpha + n_2d * beta
-
-                    grid_edge_distance = np.dot(mid_segment - pt_2d, n_2d)
-
-                    rects = self._create_2d_gripper_boxes(
-                        pt_2d, seg_dir, n_2d, grid_edge_distance
-                    )
-                    shapely_boxes.append([Polygon(rect) for rect in rects])
-
-                    pt_3d = center_pca + pt_2d[0] * dir1 + pt_2d[1] * dir2
-
-                    z_axis = plane_normal_3d
-                    x_axis = seg_dir[0] * dir1 + seg_dir[1] * dir2
-                    x_axis = x_axis / np.linalg.norm(x_axis)
-                    y_axis = np.cross(z_axis, x_axis)
-
-                    R = np.column_stack((x_axis, y_axis, z_axis))
-                    pose_4x4 = np.eye(4)
-                    pose_4x4[:3, :3] = R
-                    pose_4x4[:3, 3] = pt_3d
-                    poses_3d.append(pose_4x4)
-
-        return poses_3d, shapely_boxes
-
-    def _create_2d_gripper_boxes(self, pt, seg_dir, normal, grid_edge_distance):
-        c = self.gripper.config
-
-        half_w1 = (c.e_pg + 2 * (c.i_pg + c.rj)) / 2
-        p11 = pt + seg_dir * half_w1
-        p12 = p11 + normal * (c.x_pg + c.rj)
-        p13 = pt - seg_dir * half_w1 + normal * (c.x_pg + c.rj)
-        p14 = pt - seg_dir * half_w1
-        rect1 = [p11, p12, p13, p14]
-
-        p21 = pt + seg_dir * half_w1
-        p22 = p21 + normal * (c.b_pg + c.c_pg + c.rj)
-        p23 = pt - seg_dir * half_w1 + normal * (c.b_pg + c.c_pg + c.rj)
-        p24 = pt - seg_dir * half_w1
-        rect2 = [p21, p22, p23, p24]
-
-        center_rect3 = pt + normal * (c.b_pg + c.c_pg + c.rj)
-        half_base = (c.k_pg + 2 * c.rj) / 2
-        height_base = c.d_pg + c.t_pg + c.u_pg + c.rj
-        p31 = center_rect3 + seg_dir * half_base
-        p32 = p31 + normal * height_base
-        p33 = center_rect3 - seg_dir * half_base + normal * height_base
-        p34 = center_rect3 - seg_dir * half_base
-        rect3 = [p31, p32, p33, p34]
-
-        center_rect4 = center_rect3 + normal * height_base
-        half_arm = (max(c.ra, c.rb) + c.re + 2 * c.rj) / 2
-        height_arm = c.rc + c.rf + 2 * c.rj
-        p41 = center_rect4 + seg_dir * half_arm
-        p42 = center_rect4 - seg_dir * half_arm
-        p43 = p42 + normal * height_arm
-        p44 = p41 + normal * height_arm
-        rect4 = [p41, p42, p43, p44]
-
-        half_area = (c.z_pg - 2 * c.rj) / 2
-        height_area = c.b_pg - 2 * c.rj
-        p51 = pt + seg_dir * half_area
-        p52 = p51 + normal * height_area
-        p53 = pt - seg_dir * half_area + normal * height_area
-        p54 = pt - seg_dir * half_area
-        rect5 = [p51, p52, p53, p54]
-
-        center_rect6 = center_rect4 + normal * height_arm
-        height_back = grid_edge_distance + c.x_pg + c.rj
-        p61 = center_rect6 + seg_dir * half_arm
-        p62 = p61 + normal * height_back
-        p63 = center_rect6 - seg_dir * half_arm + normal * height_back
-        p64 = center_rect6 - seg_dir * half_arm
-        rect6 = [p61, p62, p63, p64]
-
-        return [rect1, rect2, rect3, rect4, rect5, rect6]
-
-    def _evaluate_collisions_2d(self, poses_3d, shapely_boxes, poly_lists):
-        c = self.gripper.config
-        min_area = 0.15 * (c.z_pg - 2 * c.rj) * (c.b_pg - 2 * c.rj)
-
-        polys_p1 = [p for p in poly_lists[0] if not p.is_empty]
-        prep_p2 = [prep(p) for p in poly_lists[1] if not p.is_empty]
-        prep_p3 = [prep(p) for p in poly_lists[2] if not p.is_empty]
-        prep_p4 = [prep(p) for p in poly_lists[3] if not p.is_empty]
-        prep_p5 = [prep(p) for p in poly_lists[4] if not p.is_empty]
-
-        valid_poses = []
-        valid_areas = []
-
-        stats = {"area": 0, "p2_col": 0, "p3_col": 0, "p4_col": 0, "p5_col": 0}
-
-        for pose, boxes in zip(poses_3d, shapely_boxes):
-            rect1, rect2, rect3, rect4, rect5 = boxes[:5]
-
-            area = sum(p.intersection(rect5).area for p in polys_p1)
-            if area <= min_area:
-                stats["area"] += 1
-                continue
-
-            if any(p.intersects(rect3) or p.intersects(rect4) for p in prep_p2):
-                stats["p2_col"] += 1
-                continue
-            if any(p.intersects(rect1) or p.intersects(rect2) for p in prep_p3):
-                stats["p3_col"] += 1
-                continue
-            if any(p.intersects(rect3) or p.intersects(rect4) for p in prep_p4):
-                stats["p4_col"] += 1
-                continue
-            if any(p.intersects(rect4) for p in prep_p5):
-                stats["p5_col"] += 1
-                continue
-
-            valid_poses.append(pose)
-            valid_areas.append(area)
-
-        if len(poses_3d) > 0:
-            print(
-                f"       -> [Diagnosis] Failed by: Area={stats['area']}, Col(P2)={stats['p2_col']}, Col(P3)={stats['p3_col']}, Col(P4)={stats['p4_col']}, Col(P5)={stats['p5_col']}"
-            )
-
-        return valid_poses, valid_areas
-
-    def _calculate_scores(self, valid_poses, valid_areas, pcd):
-        c = self.gripper.config
-        com = pcd.get_center()
-
-        max_area = max((c.z_pg - 2 * c.rj) * (c.b_pg - 2 * c.rj), 1e-9)
-        pts_3d = np.array([pose[:3, 3] for pose in valid_poses])
-        dists = np.linalg.norm(pts_3d - com, axis=1)
-        max_dist = np.max(dists) if len(dists) > 0 and np.max(dists) > 0 else 1.0
-
-        scores = []
-        for pose, area, dist in zip(valid_poses, valid_areas, dists):
-            s_area = np.clip((area - 0.15 * max_area) / (0.85 * max_area), 0.0, 1.0)
-            s_center = np.clip(1.0 - (dist / max_dist), 0.0, 1.0)
-            final_score = (0.9 * s_area) + (0.1 * s_center)
-            scores.append((final_score, s_area, s_center, area))
-
-        return scores
-
-    # =========================================================================
-    # Visualization
-    # =========================================================================
-    def visualize_grasp(self, pcd: o3d.geometry.PointCloud, candidate: GraspCandidate):
-        vis_pcd = copy.deepcopy(pcd)
-        vis_pcd.paint_uniform_color([0.7, 0.7, 0.7])
-
-        gripper_mesh_wrapper = self.gripper.generate_collision_mesh()
-        gripper_mesh_o3d = gripper_mesh_wrapper.geometry
-        gripper_mesh_o3d.transform(candidate.transform)
-
-        tcp_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
-        tcp_frame.transform(candidate.transform)
-
-        window_title = f"Parallel Grasp | Score: {candidate.score:.3f} | Area: {candidate.score_details['area_score']:.2f}"
-        o3d.visualization.draw_geometries(
-            [vis_pcd, gripper_mesh_o3d, tcp_frame], window_name=window_title
-        )

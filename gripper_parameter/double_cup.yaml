@@ -4,17 +4,19 @@ gripper:
   visual_mesh_path: null
   # Collision: Path for the detailed collision mesh (if available)
   collision_mesh_path: null
+  # safety_volume_shape: "bounding_box_shape" # "bounding_box_shape", "extended_body_shape", "gripper_shape"
+
   # --- PADS CONFIGURATION ---
   # Z-height of the TCP (length of the stem + relaxed cup)
-  pad_height: 0.05
+  pad_height: 0.02
   pads:
     # --- LEFT SUCTION CUP ---
     - type: "circle"            # Strictly "circle" or "rect"
       name: "left_cup"
       # Position: 4cm to the left of the center
-      offset: [-0.02, 0.0, 0.0]
+      offset: [-0.013, 0.0, 0.0]
       radius: 0.010             # 15mm radius (30mm diameter)
-      thickness: 0.001          # Absolute thickness of the ring
+      thickness: 0.004          # Absolute thickness of the ring
       relative_thickness: false # Thickness mode (absolute or relative)
       max_sealing_distance: 0.005
       zones:
@@ -24,9 +26,9 @@ gripper:
     - type: "circle"
       name: "right_cup"
       # Position: 4cm to the right of the center
-      offset: [0.02, 0.0, 0.0]
+      offset: [0.013, 0.0, 0.0]
       radius: 0.010
-      thickness: 0.001          # Absolute thickness
+      thickness: 0.004          # Absolute thickness
       relative_thickness: false # Absolute thickness setting
       max_sealing_distance: 0.005
       zones:
@@ -35,7 +37,7 @@ gripper:
   # --- BODY CONFIG ---
   # The main gripper body that holds the suction cups
   body:
-    radius: 0.05   # Raio do corpo que segura as ventosas
+    radius: 0.022   # Raio do corpo que segura as ventosas
     length: 0.10   # Comprimento total do corpo
   # --- SAFETY PARAMETERS ---
   safety:

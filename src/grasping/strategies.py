@@ -2,7 +2,6 @@ import abc
 import numpy as np
 import open3d as o3d
 from typing import List, Tuple, Dict, Type
-from copy import deepcopy
 
 # Import BaseSuctionPad for type hinting
 from src.grippers.pads import BaseSuctionPad

@@ -1,0 +1,43 @@
+# unit: m (Metros)
+# Converted from original mm values for standard ROS/Open3D compatibility
+
+#################################################
+# End Effector Parameters
+
+a_pg : 0.025 # Finger width
+w_pg : 0.001 # Internal clearance of finger width
+v_pg : 0.005 # External clearance of finger width
+f_pg : 0.080 # Finger open distance (max) (width)
+g_pg : 0.000 # Finger close distance (min) (width)
+h_pg : 0.200 # Gripper base bottom part width
+k_pg : 0.005 # Safespace Gripper base bottom width 
+q_pg : 0.200 # Gripper base top part width
+r_pg : 0.005 # External clearance of base top width
+
+b_pg : 0.018 # Gripper area length
+c_pg : 0.032 # Distance from gripper area to finger base clearance (length)
+d_pg : 0.005 # Gripper base clearance (length)
+x_pg : 0.005 # External clearance at fingertip (length)
+t_pg : 0.005 # Gripper base bottom part length
+u_pg : 0.073 # Gripper base top part length
+
+e_pg : 0.021 # Finger depth
+i_pg : 0.005 # External clearance of finger depth
+z_pg : 0.018 # Gripper area depth
+l_pg : 0.140 # Gripper base bottom part depth
+m_pg : 0.005 # External clearance of gripper base bottom part depth
+o_pg : 0.140 # Gripper base top part depth
+p_pg : 0.005 # External clearance of gripper base top part depth
+
+#################################################
+
+#################################################
+# Robot Arm Parameters
+
+ra : 0.200 # Width of last robot arm limb
+rb : 0.180 # Depth of last robot arm limb
+rc : 0.170 # Length of last robot arm limb
+re : 0.050 # Robot arm diameter clearance
+rf : 0.050 # Robot arm length clearance
+rj : 0.0001 # repeatability of robot arm
+#################################################

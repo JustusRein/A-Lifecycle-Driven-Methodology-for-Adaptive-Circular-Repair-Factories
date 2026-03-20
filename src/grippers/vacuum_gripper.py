@@ -2,7 +2,7 @@ import open3d as o3d
 import numpy as np
 import trimesh
 import yaml
-from typing import List, Literal, Optional, Union
+from typing import Literal, Optional, Union
 from dataclasses import dataclass
 from src.grippers.base_gripper import BaseGripper
 from src.generic_geometry import GenericGeometry

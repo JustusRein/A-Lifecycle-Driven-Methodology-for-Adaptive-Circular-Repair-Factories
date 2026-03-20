@@ -3,7 +3,6 @@ import numpy as np
 import open3d as o3d
 import trimesh
 from dataclasses import dataclass
-from typing import Any, Optional
 
 from src.grippers.base_gripper import BaseGripper
 from src.generic_geometry import GenericGeometry

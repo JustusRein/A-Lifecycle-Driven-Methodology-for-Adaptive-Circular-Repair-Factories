@@ -1,8 +1,7 @@
 import copy
-from logging import debug
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional, TypedDict
+from typing import Dict, List, Literal, TypedDict
 
 import numpy as np
 import open3d as o3d
@@ -39,7 +38,15 @@ class VacuumSamplerConfig:
 
     # Sampling Parameters
     num_samples: int = 200
+    # Distance in meters that the gripper will "reach into" the object during collision checks.
     approach_distance: float = 0.10
+    # When checking for collisions, we ignore the first 1.5cm (0.015m) from the contact point to allow the suction cup to touch the surface without being considered a collision.
+    local_clearence_margin: float = 0.015
+
+    # Collision volume shape: "bounding_box_shape", "extended_body_shape", "gripper_shape"
+    safety_volume_shape: Literal[
+        "bounding_box_shape", "extended_body_shape", "gripper_shape"
+    ] = "bounding_box_shape"
 
     # --- Orientation Strategy ---
     # "uniform": Rotate gripper around the normal vector (for asymmetric grippers).
@@ -53,7 +60,7 @@ class VacuumSamplerConfig:
     rotation_range_deg: int = 180
 
     # --- Thresholds ---
-    max_curvature: float = 0.05
+    # max_curvature: float = 0.05
     max_angle_deg: float = 45.0
     min_score: float = 0.5
 
@@ -172,7 +179,9 @@ class VacuumGraspSampler(
         rays_tensor = o3d.core.Tensor(np.array(rays_list), dtype=o3d.core.Dtype.Float32)
         results = scene.cast_rays(rays_tensor)
         t_hits = results["t_hit"].numpy()
-
+        # >>> CHAMADA DE DEBUG AQUI <<<
+        max_dim = np.max(pcd.get_max_bound() - pcd.get_min_bound())
+        self._debug_raycasting(pcd, rays_list, t_hits, radius=(max_dim / 2) * 1.5)
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
 
         # D. Process Hits
@@ -213,7 +222,7 @@ class VacuumGraspSampler(
 
         # 2. Check collision at the BASE pose (without rotation logic first)
         # This is a quick check to discard obviously bad points (like deep holes)
-        if self._is_in_collision(real_point, real_normal):
+        if self._is_in_collision(real_point, real_normal, pcd):
             return
 
         # 3. Strategy: Generate Orientations
@@ -277,14 +286,136 @@ class VacuumGraspSampler(
         poses = [gu.create_pose_matrix(R, point) for R in rot_matrices]
         return poses
 
-    def _is_in_collision(self, point: np.ndarray, normal: np.ndarray) -> bool:
-        # Checks collision using the Gripper's safety volume generation logic
+    # ====================================================================
+    # COLLISION SHAPE SUB-METHODS
+    # ====================================================================
+
+    def _check_bounding_box_collision(
+        self,
+        point: np.ndarray,
+        normal: np.ndarray,
+        pcd: o3d.geometry.PointCloud,
+        start_offset: float,
+        total_length: float,
+        body_radius: float,
+        **kwargs,
+    ) -> bool:
+        """Local collision check using an Oriented Bounding Box."""
+        center = point + normal * (start_offset + total_length / 2.0)
+        extent = np.array([body_radius * 2, body_radius * 2, total_length])
+        R = gu.get_rotation_matrix_between_vectors(np.array([0, 0, 1]), normal)
+
+        obb = o3d.geometry.OrientedBoundingBox(center, R, extent)
+        cropped_pcd = pcd.crop(obb)
+
+        return len(cropped_pcd.points) > 5
+
+    def _check_extended_body_collision(
+        self,
+        point: np.ndarray,
+        normal: np.ndarray,
+        pcd: o3d.geometry.PointCloud,
+        start_offset: float,
+        total_length: float,
+        body_radius: float,
+        **kwargs,
+    ) -> bool:
+        """Local collision check using exact mathematical cylinder projection."""
+        pts = np.asarray(pcd.points)
+        vecs = pts - point
+
+        z_distances = np.dot(vecs, normal)
+        z_mask = (z_distances >= start_offset) & (
+            z_distances <= start_offset + total_length
+        )
+        pts_in_z_slice = vecs[z_mask]
+
+        if len(pts_in_z_slice) == 0:
+            return False
+
+        z_distances_filtered = z_distances[z_mask]
+        radial_vecs = pts_in_z_slice - np.outer(z_distances_filtered, normal)
+        radial_distances_sq = np.sum(radial_vecs**2, axis=1)
+
+        points_inside_cylinder = np.sum(radial_distances_sq <= (body_radius**2))
+        return points_inside_cylinder > 5
+
+    def _check_gripper_shape_collision(
+        self, pcd: o3d.geometry.PointCloud, safety_mesh, **kwargs
+    ) -> bool:
+        """Local collision check using the exact Trimesh geometry."""
+        pts = np.asarray(pcd.points)
+        try:
+            inside_mask = safety_mesh.contains(pts)
+            return np.sum(inside_mask) > 5
+        except Exception as e:
+            print(f"[Warning] Failed to run 'contains' on gripper mesh. Error: {e}")
+            return False
+
+    # ====================================================================
+    # MAIN COLLISION METHOD
+    # ====================================================================
+
+    def _is_in_collision(
+        self,
+        point: np.ndarray,
+        normal: np.ndarray,
+        pcd: o3d.geometry.PointCloud,
+        safety_volume_shape: Literal[
+            "gripper_shape", "bounding_box_shape", "extended_body_shape"
+        ] = "bounding_box_shape",
+    ) -> bool:
+        """
+        Checks for collisions on two levels: Global (Environment) and Local (Target Object).
+        Uses a dispatch table to route the local check to the chosen geometric shape.
+        """
+        # 1. GLOBAL SHIELD (Environment via Trimesh)
         safety_mesh = self.gripper.generate_safety_collision_mesh(
             contact_point=point,
             surface_normal=normal,
             approach_distance=self.config.approach_distance,
         )
-        return self.check_collision(safety_mesh)
+
+        if self.check_collision(safety_mesh):
+            return True
+
+        # 2. LOCAL SHIELD SETUP (Target Object via Point Cloud)
+        if self.config.approach_distance <= 0:
+            return False
+
+        clearance_margin = self.config.local_clearence_margin
+        pad_length = self.gripper.config.pad_height
+        approach_distance = self.config.approach_distance
+
+        start_offset = clearance_margin
+        total_length = pad_length + approach_distance
+        body_radius = self.gripper.config.body_radius * (
+            1.0 + self.gripper.config.collision_margin
+        )
+
+        # 3. DISPATCHER TABLE
+        shape_dispatcher = {
+            "bounding_box_shape": self._check_bounding_box_collision,
+            "extended_body_shape": self._check_extended_body_collision,
+            "gripper_shape": self._check_gripper_shape_collision,
+        }
+
+        collision_method = shape_dispatcher.get(safety_volume_shape)
+
+        if not collision_method:
+            raise ValueError(
+                f"Unknown safety_volume_shape: '{safety_volume_shape}'. Expected one of {list(shape_dispatcher.keys())}"
+            )
+
+        return collision_method(
+            point=point,
+            normal=normal,
+            pcd=pcd,
+            start_offset=start_offset,
+            total_length=total_length,
+            body_radius=body_radius,
+            safety_mesh=safety_mesh,
+        )
 
     # =========================================================================
     # Phase 2: Evaluation (Multi-Pad GSS)
@@ -515,14 +646,17 @@ class VacuumGraspSampler(
     def _calculate_verticality(self, cand):
         z_axis = np.array([0, 0, 1])
         normal = -cand.approach_vector  # Approach vector points INTO the object
-        dot = np.dot(cand.approach_vector, z_axis)
+        dot = np.dot(normal, z_axis)
         angle_deg = np.degrees(np.arccos(np.clip(abs(dot), -1.0, 1.0)))
+        # Penalty: If the approach vector points downwards (dot < 0), we apply a decay factor to the verticality score to prefer grasps that approach from above.
+        decay_factor = 0.6 if dot < 0 else 1.0
 
         if angle_deg > self.config.max_angle_deg:
+            print("[Debug] Candidate failed verticality check: angle_deg =", angle_deg)
             return 0.0, angle_deg
 
         s_vert = 1.0 - (angle_deg / self.config.max_angle_deg)
-        return np.clip(s_vert, 0.0, 1.0), angle_deg
+        return decay_factor * (np.clip(s_vert, 0.0, 1.0)), angle_deg
 
     def _calculate_torque(self, cand, com_xy, max_torque):
         grasp_xy = cand.contact_point[:2]
@@ -703,6 +837,67 @@ class VacuumGraspSampler(
 
         # 4. Show the grasp in 3D for reference
         self.visualize_grasp(pcd, candidate, show_safety_volume=True)
+
+    def _debug_raycasting(self, pcd, rays_list, t_hits, radius):
+        """
+        Visualizador espetacular para o Raycasting!
+        Mostra a nuvem, os raios, os pontos de impacto e o infame teto do Convex Hull.
+        """
+        import copy
+
+        geometries = []
+
+        # 1. A Nuvem Original (Cinza escuro)
+        pcd_vis = copy.deepcopy(pcd)
+        pcd_vis.paint_uniform_color([0.4, 0.4, 0.4])
+        geometries.append(pcd_vis)
+
+        # 2. O Infame Convex Hull (Laranja em Wireframe) - O Teto fantasma!
+        hull_mesh, _ = pcd.compute_convex_hull()
+        hull_ls = o3d.geometry.LineSet.create_from_triangle_mesh(hull_mesh)
+        hull_ls.paint_uniform_color([1.0, 0.5, 0.0])  # Laranja
+        geometries.append(hull_ls)
+
+        # 3. Os Raios (Verde se acertou, Vermelho se passou reto)
+        points = []
+        lines = []
+        colors = []
+        hit_points = []
+
+        for i, t in enumerate(t_hits):
+            origin = rays_list[i][:3]
+            dir_vec = rays_list[i][3:]
+
+            if np.isinf(t):  # Raio perdeu-se no espaço
+                end_pt = origin + dir_vec * (radius * 1.5)
+                color = [0.8, 0.2, 0.2]  # Vermelho
+            else:  # Raio bateu no Convex Hull!
+                end_pt = origin + dir_vec * t
+                color = [0.2, 0.8, 0.2]  # Verde
+                hit_points.append(end_pt)
+
+            idx = len(points)
+            points.extend([origin, end_pt])
+            lines.append([idx, idx + 1])
+            colors.append(color)
+
+        ray_lines = o3d.geometry.LineSet()
+        ray_lines.points = o3d.utility.Vector3dVector(points)
+        ray_lines.lines = o3d.utility.Vector2iVector(lines)
+        ray_lines.colors = o3d.utility.Vector3dVector(colors)
+        geometries.append(ray_lines)
+
+        # 4. Os pontos de impacto exatos (Bolinhas Azuis)
+        if hit_points:
+            hits_pcd = o3d.geometry.PointCloud()
+            hits_pcd.points = o3d.utility.Vector3dVector(hit_points)
+            hits_pcd.paint_uniform_color([0.0, 0.0, 1.0])
+            geometries.append(hits_pcd)
+
+        print("[Debug] Abrindo Visualizador de Raycasting...")
+        o3d.visualization.draw_geometries(
+            geometries, window_name="Raycasting Debug - O Mistério do Convex Hull"
+        )
 
 
 def debug_pad_projection(pad, local_points_3d, zone_dict):

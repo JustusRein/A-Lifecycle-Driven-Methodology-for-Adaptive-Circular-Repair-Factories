@@ -619,37 +619,33 @@ def merge_coplanar_planes(
 def compute_pcd_normals(
     pcd: o3d.geometry.PointCloud,
     radius: Optional[float] = None,
-    max_nn: int = 30,
+    max_nn: int = 50,  # Aumentado de 30 para 50 para fazer o SMOOTHENING das normais
     align_vector: Optional[np.ndarray] = None,
 ) -> o3d.geometry.PointCloud:
     """
-    Estimates normals for a point cloud.
-
-    Args:
-        pcd: Input point cloud.
-        radius: Search radius. If None, calculated automatically from bounding box.
-        max_nn: Max neighbors to use.
-        align_vector: Optional [x,y,z] vector to orient normals towards (e.g., [0,0,1]).
+    Estimates and smooths normals for a point cloud.
     """
-    # 1. Automatic Radius Calculation if not provided
+    # 1. Automatic Radius Calculation (Must respect thin walls!)
     if radius is None:
         pts = np.asarray(pcd.points)
         if len(pts) == 0:
             return pcd
         diag = float(np.linalg.norm(pts.max(0) - pts.min(0)))
-        radius = max(1e-9, 0.02 * diag)  # Heuristic: 2% of diagonal
 
-    # 2. Estimate Normals
+        # Heuristic: 1% of diagonal.
+        # For a 10cm CubeSat, this is 1mm (safe for a 2mm thick wall).
+        radius = max(1e-9, 0.01 * diag)
+
+    # 2. Estimate and Smooth Normals
     pcd.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=max_nn)
     )
 
-    # 3. Orient Normals (Critical for Poisson and Vacuum Gripper)
-    if align_vector is not None:
-        # Orient consistent with a tangent plane first to fix local flips
-        pcd.orient_normals_consistent_tangent_plane(k=15)
+    # 3. Basic Local Consistency (Fixes flipped patches, but relies on Raycaster for final true inside/outside)
+    pcd.orient_normals_consistent_tangent_plane(k=15)
 
-        # Then align globally to the specific direction
+    # 4. Global Alignment (Optional, use only for solid convex objects, NOT hollow boxes)
+    if align_vector is not None:
         vec = np.asarray(align_vector, dtype=float)
         try:
             pcd.orient_normals_to_align_with_direction(vec)
@@ -657,6 +653,51 @@ def compute_pcd_normals(
             pass
 
     return pcd
+
+
+#
+# def compute_pcd_normals(
+#     pcd: o3d.geometry.PointCloud,
+#     radius: Optional[float] = None,
+#     max_nn: int = 30,
+#     align_vector: Optional[np.ndarray] = None,
+# ) -> o3d.geometry.PointCloud:
+#     """
+#     Estimates normals for a point cloud.
+#
+#     Args:
+#         pcd: Input point cloud.
+#         radius: Search radius. If None, calculated automatically from bounding box.
+#         max_nn: Max neighbors to use.
+#         align_vector: Optional [x,y,z] vector to orient normals towards (e.g., [0,0,1]).
+#     """
+#     # 1. Automatic Radius Calculation if not provided
+#     if radius is None:
+#         pts = np.asarray(pcd.points)
+#         if len(pts) == 0:
+#             return pcd
+#         diag = float(np.linalg.norm(pts.max(0) - pts.min(0)))
+#         radius = max(1e-9, 0.02 * diag)  # Heuristic: 2% of diagonal
+#
+#     # 2. Estimate Normals
+#     pcd.estimate_normals(
+#         search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=max_nn)
+#     )
+#
+#     # 3. Orient Normals (Critical for Poisson and Vacuum Gripper)
+#     if align_vector is not None:
+#         # Orient consistent with a tangent plane first to fix local flips
+#         pcd.orient_normals_consistent_tangent_plane(k=15)
+#
+#         # Then align globally to the specific direction
+#         vec = np.asarray(align_vector, dtype=float)
+#         try:
+#             pcd.orient_normals_to_align_with_direction(vec)
+#         except RuntimeError:
+#             pass
+#
+#     return pcd
+#
 
 
 ####---
@@ -949,6 +990,136 @@ def get_point_cloud_density(pcd: o3d.geometry.PointCloud) -> PointCloudDensityRe
     return dict_dists
 
 
+def create_raycasting_scene(
+    pcd: o3d.geometry.PointCloud,
+    hull_type: Literal["convex", "bpa", "poisson", "alpha"] = "alpha",
+    debug_visualize: bool = True,
+) -> o3d.t.geometry.RaycastingScene:
+    """
+    Creates an Open3D RaycastingScene using a specified mesh generation strategy.
+
+    Args:
+        pcd: The input point cloud.
+        hull_type: The algorithm used to generate the mesh for raycasting.
+            - 'convex': Fast, creates a shrink-wrapped rigid boundary (closes holes).
+            - 'bpa': Ball Pivoting Algorithm. Preserves cavities and open tops.
+            - 'poisson': Smooth and watertight. Good for noisy but closed objects.
+            - 'alpha': Alpha Shapes (Concave Hull). Deflates to fit cavities, robust to holes.
+        debug_visualize: If True, opens an Open3D window to show the generated mesh.
+    """
+    # Ensure normals are present for BPA and Poisson
+    if hull_type in ["bpa", "poisson"] and not pcd.has_normals():
+        pcd.estimate_normals()
+
+    mesh = None
+
+    # ==========================================
+    # MODE A: Convex Hull (Fastest, closes cavities)
+    # ==========================================
+    if hull_type == "convex":
+        mesh, _ = pcd.compute_convex_hull()
+
+    # ==========================================
+    # MODE B: Ball Pivoting (Preserves cavities) - BUFFED
+    # ==========================================
+    elif hull_type == "bpa":
+        distances = pcd.compute_nearest_neighbor_distance()
+        avg_dist = np.mean(distances) if len(distances) > 0 else 0.01
+
+        # Aggressive multipliers to fill large gaps ("Swiss Cheese" problem)
+        radii = [
+            avg_dist,
+            avg_dist * 2.0,
+            avg_dist * 4.0,
+            avg_dist * 8.0,
+            avg_dist * 16.0,
+        ]
+
+        mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+            pcd, o3d.utility.DoubleVector(radii)
+        )
+        if len(mesh.triangles) == 0:
+            print("[Warning] BPA failed to generate mesh. Falling back to Convex Hull.")
+            mesh, _ = pcd.compute_convex_hull()
+
+    # ==========================================
+    # MODE C: Poisson (Smooth, attempts to close holes)
+    # ==========================================
+    elif hull_type == "poisson":
+        # depth=8 is a good balance between detail and speed for grasping
+        mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+            pcd, depth=8
+        )
+
+        if len(mesh.triangles) == 0:
+            print(
+                "[Warning] Poisson failed to generate mesh. Falling back to Convex Hull."
+            )
+            mesh, _ = pcd.compute_convex_hull()
+
+    # ==========================================
+    # MODE D: Alpha Shape (Concave Hull)
+    # ==========================================
+    elif hull_type == "alpha":
+        distances = pcd.compute_nearest_neighbor_distance()
+        avg_dist = np.mean(distances) if len(distances) > 0 else 0.01
+
+        # 6.0 is generally a good heuristic for packaging/boxes
+        alpha_val = avg_dist * 5.0
+
+        mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(
+            pcd, alpha_val
+        )
+
+        if len(mesh.triangles) == 0:
+            print(
+                "[Warning] Alpha Shape failed to generate mesh. Falling back to Convex Hull."
+            )
+            mesh, _ = pcd.compute_convex_hull()
+
+    else:
+        raise ValueError(
+            f"Unknown hull_type: '{hull_type}'. Expected 'convex', 'bpa', 'poisson', or 'alpha'."
+        )
+
+    # ==========================================
+    # DEBUG VISUALIZATION BLOCK
+    # ==========================================
+    if debug_visualize:
+        print(f"[Debug] Visualizing Raycasting Mesh (Type: {hull_type})...")
+
+        # 1. Original Point Cloud (Grey)
+        pcd_vis = copy.deepcopy(pcd)
+        pcd_vis.paint_uniform_color([0.6, 0.6, 0.6])
+
+        # 2. Solid Transparent Mesh (helps visualize volume)
+        mesh_solid = copy.deepcopy(mesh)
+        mesh_solid.compute_vertex_normals()
+        mesh_solid.paint_uniform_color([0.8, 0.8, 0.8])
+
+        # 3. Wireframe Mesh (Red Lines) to see exact topology
+        wireframe = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
+        wireframe.paint_uniform_color([1.0, 0.0, 0.0])
+
+        # Hint: Press 'W' in the Open3D window to toggle solid mesh rendering!
+        o3d.visualization.draw_geometries(
+            [pcd_vis, mesh_solid, wireframe],
+            window_name=f"Hull Debug: {hull_type.upper()}",
+        )
+
+    # ==========================================
+    # Build Raycasting Scene
+    # ==========================================
+    try:
+        # Open3D Tensor Geometry is required for Raycasting
+        mesh_t = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+        scene = o3d.t.geometry.RaycastingScene()
+        scene.add_triangles(mesh_t)
+        return scene
+    except Exception as e:
+        raise Exception(f"[GeometryUtils] Error creating RaycastingScene: {e}")
+
+
 def create_raycasting_scene_from_hull(
     pcd: o3d.geometry.PointCloud,
 ) -> o3d.t.geometry.RaycastingScene:
@@ -988,30 +1159,59 @@ def generate_fibonacci_sphere_points(n_samples: int) -> np.ndarray:
 
 
 def generate_inward_rays_from_sphere(
-    center: np.ndarray, radius: float, n_samples: int
+    center: np.ndarray, radius: float, n_samples: int, hemisphere_only: bool = True
 ) -> List[np.ndarray]:
     """
     Generates rays starting from a bounding sphere pointing towards the center.
-    Returns: List of arrays [origin_x, origin_y, origin_z, dir_x, dir_y, dir_z]
+    If hemisphere_only is True, discards rays originating from the bottom half.
     """
-    # Get distributed directions (Unit vectors pointing OUT)
+    # 1. Gera os pontos distribuídos na esfera
     sphere_dirs = generate_fibonacci_sphere_points(n_samples)
     rays_list = []
 
     for dir_vec in sphere_dirs:
-        # Origin on sphere surface
+        # Se ativado, ignora os vetores cuja origem (dir_vec) estaria na parte de baixo da esfera (Z negativo)
+        if hemisphere_only and dir_vec[2] < 0:
+            continue
+
+        # Calcula a origem do raio multiplicando pelo raio da esfera
         origin = center + (dir_vec * radius)
 
-        # Direction towards center (normalized)
-        # cast_dir = center - origin
-        # cast_dir = cast_dir / np.linalg.norm(cast_dir)
-        cast_dir = -dir_vec  # Since dir_vec is already unit length
+        # O raio aponta da origem para o centro (como dir_vec é unitário, o inverso é -dir_vec)
+        cast_dir = -dir_vec
 
-        # Pack into 6D vector for Open3D
         ray = np.concatenate([origin, cast_dir]).astype(np.float32)
         rays_list.append(ray)
 
     return rays_list
+
+
+# def generate_inward_rays_from_sphere(
+#     center: np.ndarray, radius: float, n_samples: int
+# ) -> List[np.ndarray]:
+#     """
+#     Generates rays starting from a bounding sphere pointing towards the center.
+#     Returns: List of arrays [origin_x, origin_y, origin_z, dir_x, dir_y, dir_z]
+#     """
+#     # Get distributed directions (Unit vectors pointing OUT)
+#     sphere_dirs = generate_fibonacci_sphere_points(n_samples)
+#     rays_list = []
+#
+#     for dir_vec in sphere_dirs:
+#         # Origin on sphere surface
+#         origin = center + (dir_vec * radius)
+#
+#         # Direction towards center (normalized)
+#         # cast_dir = center - origin
+#         # cast_dir = cast_dir / np.linalg.norm(cast_dir)
+#         cast_dir = -dir_vec  # Since dir_vec is already unit length
+#
+#         # Pack into 6D vector for Open3D
+#         ray = np.concatenate([origin, cast_dir]).astype(np.float32)
+#         rays_list.append(ray)
+#
+#     return rays_list
+#
 
 
 def get_nearest_point_in_cloud(

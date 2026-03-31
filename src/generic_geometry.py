@@ -550,6 +550,7 @@ class GenericGeometry:
         nb_neighbors: int = 20,
         std_ratio: float = 2.0,
         voxel_size: float = 0.0,
+        normal_orientation: Optional[np.ndarray] = None,
     ):
         """
         This represents the complete 'Preprocessing' pipeline for grasp sampling.
@@ -586,10 +587,11 @@ class GenericGeometry:
         )
 
         # 4. Consistent Normal Orientation
-        # Instead of aligning to a camera (which flips the back), this method
-        # propagates normal direction through the neighbor graph.
-        # Result: All normals point OUTWARDS, regardless of where the camera was.
-        pcd_clean.orient_normals_consistent_tangent_plane(k=15)
+        # if orientation is given, point to camera, else do consistent tangent plane
+        if normal_orientation is not None:
+            pcd_clean.orient_normals_towards_camera_location(normal_orientation)
+        else:
+            pcd_clean.orient_normals_consistent_tangent_plane(k=15)
 
         print(f"[Clean] Points after full cleaning: {len(self.geometry.points)}")
         return pcd_clean

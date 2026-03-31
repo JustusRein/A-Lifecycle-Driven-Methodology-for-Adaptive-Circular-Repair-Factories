@@ -38,6 +38,11 @@ class VacuumSamplerConfig:
 
     # Sampling Parameters
     num_samples: int = 200
+
+    # --- Raycasting & Mesh Generation ---
+    raycasting_hull_type: Literal["convex", "bpa", "poisson", "alpha"] = "alpha"
+    raycasting_hemisphere_only: bool = True
+
     # Distance in meters that the gripper will "reach into" the object during collision checks.
     approach_distance: float = 0.10
     # When checking for collisions, we ignore the first 1.5cm (0.015m) from the contact point to allow the suction cup to touch the surface without being considered a collision.
@@ -60,18 +65,13 @@ class VacuumSamplerConfig:
     rotation_range_deg: int = 180
 
     # --- Thresholds ---
-    # max_curvature: float = 0.05
     max_angle_deg: float = 45.0
     min_score: float = 0.5
 
-    # Maximum allowed gap between a pad and the surface (meters).
-    # If a pad is floating more than this value, the grasp is invalid.
-    # max_pad_gap: float = 0.01
-
     # --- Weights ---
-    weight_seal: float = 0.40
-    weight_verticality: float = 0.30
-    weight_torque: float = 0.30
+    weight_seal: float = 0.35
+    weight_verticality: float = 0.40
+    weight_torque: float = 0.25
 
     # --- Score Aggregation ---
     # How to combine scores from multiple pads?
@@ -123,11 +123,7 @@ class VacuumGraspSampler(
                 )
             )
 
-        # Force consistent orientation (solves the "half-moon" problem in the can)
-        # pcd.orient_normals_consistent_tangent_plane(k=15)
-
         # 1. Phase 1: Generation (Geometry + Collision)
-        # Finds surface points and generates N orientations per point based on strategy.
         self._generate_candidates(pcd)
 
         print(f"[VacuumSampler] Phase 1: Generated {len(self.candidates)} candidates.")
@@ -136,7 +132,6 @@ class VacuumGraspSampler(
             return []
 
         # 2. Phase 2: Evaluation (GSS - Grasp Stability Score)
-        # Calculates physical scores (Flatness, Torque) for all pads.
         self._evaluate_candidates(pcd)
 
         # 3. Phase 3: Filtering & Sorting
@@ -152,7 +147,6 @@ class VacuumGraspSampler(
         if not pcd.has_points():
             print("[VacuumSampler] Error: Empty Point Cloud.")
             return False
-        # Ensure normals exist (crucial for orientation alignment)
         if not pcd.has_normals():
             pcd.estimate_normals()
         return True
@@ -165,12 +159,14 @@ class VacuumGraspSampler(
         """
         Orchestrates raycasting and delegates orientation generation.
         """
-        # A. Setup Raycasting Scene
-        scene = gu.create_raycasting_scene_from_hull(pcd)
+        # A. Setup Raycasting Scene using the configured hull type
+        scene = gu.create_raycasting_scene(
+            pcd, hull_type=self.config.raycasting_hull_type
+        )
         if scene is None:
             return
 
-        # B. Create Rays (Inward from sphere)
+        # B. Create Rays (Inward from sphere / upper hemisphere)
         rays_list = self._create_rays_for_pcd(pcd)
         if not rays_list:
             return
@@ -179,9 +175,11 @@ class VacuumGraspSampler(
         rays_tensor = o3d.core.Tensor(np.array(rays_list), dtype=o3d.core.Dtype.Float32)
         results = scene.cast_rays(rays_tensor)
         t_hits = results["t_hit"].numpy()
-        # >>> CHAMADA DE DEBUG AQUI <<<
+
+        # >>> CHAMADA DE DEBUG <<< (Pode comentar depois se quiser silenciar)
         max_dim = np.max(pcd.get_max_bound() - pcd.get_min_bound())
         self._debug_raycasting(pcd, rays_list, t_hits, radius=(max_dim / 2) * 1.5)
+
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
 
         # D. Process Hits
@@ -202,7 +200,10 @@ class VacuumGraspSampler(
         radius = (max_dim / 2) * 1.5
 
         return gu.generate_inward_rays_from_sphere(
-            center, radius, self.config.num_samples
+            center,
+            radius,
+            self.config.num_samples,
+            hemisphere_only=self.config.raycasting_hemisphere_only,
         )
 
     def _process_single_hit(self, t_dist, ray_origin, ray_dir, pcd, pcd_tree):
@@ -220,13 +221,13 @@ class VacuumGraspSampler(
         if np.dot(ray_dir, real_normal) > 0:
             real_normal = -real_normal
 
-        # 2. Check collision at the BASE pose (without rotation logic first)
-        # This is a quick check to discard obviously bad points (like deep holes)
-        if self._is_in_collision(real_point, real_normal, pcd):
+        # 2. Check collision at the BASE pose
+        if self._is_in_collision(
+            real_point, real_normal, pcd, self.config.safety_volume_shape
+        ):
             return
 
         # 3. Strategy: Generate Orientations
-        # Decouples "Finding a point" from "Determining rotations"
         poses = self._generate_orientations(real_point, real_normal)
 
         # 4. Store all generated poses as candidates
@@ -243,14 +244,8 @@ class VacuumGraspSampler(
     def _generate_orientations(
         self, point: np.ndarray, normal: np.ndarray
     ) -> List[np.ndarray]:
-        """
-        Strategy Dispatcher: Generates valid poses based on the config strategy.
-        Delegates math to geometry_utils.
-        """
-
         R_base = gu.get_rotation_matrix_between_vectors(np.array([0, 0, 1]), normal)
 
-        # 2. Dispatch
         dispatch_map = {
             "fixed": self._strategy_fixed_orientation,
             "uniform": self._strategy_uniform_fan,
@@ -263,26 +258,17 @@ class VacuumGraspSampler(
     def _strategy_fixed_orientation(
         self, point: np.ndarray, base_rotation: np.ndarray
     ) -> List[np.ndarray]:
-        """
-        Returns a single pose aligned with the normal. (Symmetric grippers).
-        """
         pose = gu.create_pose_matrix(base_rotation, point)
         return [pose]
 
     def _strategy_uniform_fan(
         self, point: np.ndarray, base_rotation: np.ndarray
     ) -> List[np.ndarray]:
-        """
-        Generates a 'fan' of rotations around the normal vector. (Asymmetric grippers).
-        """
-        # Delegate heavy math to Geometry Utils
         rot_matrices = gu.generate_z_rotation_fan(
             base_rotation=base_rotation,
             step_deg=self.config.rotation_step_deg,
             range_deg=self.config.rotation_range_deg,
         )
-
-        # Convert all rotations into 4x4 poses
         poses = [gu.create_pose_matrix(R, point) for R in rot_matrices]
         return poses
 
@@ -300,7 +286,6 @@ class VacuumGraspSampler(
         body_radius: float,
         **kwargs,
     ) -> bool:
-        """Local collision check using an Oriented Bounding Box."""
         center = point + normal * (start_offset + total_length / 2.0)
         extent = np.array([body_radius * 2, body_radius * 2, total_length])
         R = gu.get_rotation_matrix_between_vectors(np.array([0, 0, 1]), normal)
@@ -320,7 +305,6 @@ class VacuumGraspSampler(
         body_radius: float,
         **kwargs,
     ) -> bool:
-        """Local collision check using exact mathematical cylinder projection."""
         pts = np.asarray(pcd.points)
         vecs = pts - point
 
@@ -343,7 +327,6 @@ class VacuumGraspSampler(
     def _check_gripper_shape_collision(
         self, pcd: o3d.geometry.PointCloud, safety_mesh, **kwargs
     ) -> bool:
-        """Local collision check using the exact Trimesh geometry."""
         pts = np.asarray(pcd.points)
         try:
             inside_mask = safety_mesh.contains(pts)
@@ -365,10 +348,6 @@ class VacuumGraspSampler(
             "gripper_shape", "bounding_box_shape", "extended_body_shape"
         ] = "bounding_box_shape",
     ) -> bool:
-        """
-        Checks for collisions on two levels: Global (Environment) and Local (Target Object).
-        Uses a dispatch table to route the local check to the chosen geometric shape.
-        """
         # 1. GLOBAL SHIELD (Environment via Trimesh)
         safety_mesh = self.gripper.generate_safety_collision_mesh(
             contact_point=point,
@@ -393,7 +372,6 @@ class VacuumGraspSampler(
             1.0 + self.gripper.config.collision_margin
         )
 
-        # 3. DISPATCHER TABLE
         shape_dispatcher = {
             "bounding_box_shape": self._check_bounding_box_collision,
             "extended_body_shape": self._check_extended_body_collision,
@@ -422,16 +400,12 @@ class VacuumGraspSampler(
     # =========================================================================
 
     def _evaluate_candidates(self, pcd: o3d.geometry.PointCloud):
-        """
-        Calculates scores for all candidates.
-        """
         all_points = np.asarray(pcd.points)
         if not pcd.has_normals():
             pcd.estimate_normals()
         all_normals = np.asarray(pcd.normals)
 
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
-        # Optimize: Calculate global stats once
         com_xy, max_torque_arm = self._calculate_global_stats(pcd, all_points)
 
         for cand in self.candidates:
@@ -440,16 +414,12 @@ class VacuumGraspSampler(
             )
 
     def debug_candidates(self, pcd: o3d.geometry.PointCloud, debug_idx: List[int]):
-        """
-        Calculates scores for all candidates.
-        """
         all_points = np.asarray(pcd.points)
         if not pcd.has_normals():
             pcd.estimate_normals()
         all_normals = np.asarray(pcd.normals)
 
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
-        # Optimize: Calculate global stats once
         com_xy, max_torque_arm = self._calculate_global_stats(pcd, all_points)
 
         for idx in debug_idx:
@@ -474,28 +444,19 @@ class VacuumGraspSampler(
         max_torque_arm: float,
         debug: bool = False,
     ) -> None:
-        """
-        Evaluates a single grasp candidate.
-        If config.debug_score is True, it continues evaluating all metrics even after a failure
-        to provide full diagnostic data.
-        """
         fail_reasons: List[str] = []
         is_failed = False
 
-        # 1. Verticality Check
         s_vert, angle_deg = self._calculate_verticality(cand)
         if s_vert == 0.0:
             is_failed = True
             fail_reasons.append("bad_angle")
-            # If NOT debugging, return early to save time
             if not self.config.debug_score:
                 self._mark_candidate_failed(cand, "bad_angle")
                 return
 
-        # 2. Torque Check
         s_torque = self._calculate_torque(cand, com_xy, max_torque_arm)
 
-        # 3. CONTACT RESOLUTION (Strategy)
         contact_points, adjusted_pose = self.strategy.resolve_contacts(
             cand.transform, self.gripper.config.pads, pcd_tree, all_points
         )
@@ -503,7 +464,6 @@ class VacuumGraspSampler(
         cand.transform = adjusted_pose
         cand.contact_point = adjusted_pose[:3, 3]
 
-        # 4. Multi-Pad Physical Evaluation (Seal)
         s_seal, pad_scores_dict = self._evaluate_suction_seal(
             cand, contact_points, pcd_tree, all_points, all_normals, debug
         )
@@ -516,7 +476,6 @@ class VacuumGraspSampler(
                 cand.score_details["pad_scores"] = pad_scores_dict
                 return
 
-        # 5. Final Score Calculation
         weighted_score = (
             (self.config.weight_seal * s_seal)
             + (self.config.weight_verticality * s_vert)
@@ -531,16 +490,12 @@ class VacuumGraspSampler(
             torque=s_torque,
             raw_angle_deg=angle_deg,
             pad_scores=pad_scores_dict,
-            failure_reason=fail_reasons,  # Now passing the list directly
+            failure_reason=fail_reasons,
         )
 
     def _evaluate_suction_seal(
         self, cand, contact_points, pcd_tree, all_points, all_normals, debug
     ):
-        """
-        Calculates the Seal Score based on Zone Coverage.
-        Transforms points into the pad's local frame to check coverage against defined zones.
-        """
         pad_scores = []
         pad_details = {}
 
@@ -550,8 +505,6 @@ class VacuumGraspSampler(
         for i, pad in enumerate(self.gripper.config.pads):
             nearest_pt = contact_points[i]
 
-            # --- A. Gap Check ---
-            # Calculates the distance between the ideal pad position and the actual surface.
             world_pad_pos = TCP_pos + (R_cand @ pad.offset)
             gap = np.linalg.norm(world_pad_pos - nearest_pt)
 
@@ -560,10 +513,6 @@ class VacuumGraspSampler(
                 pad_details[pad.name] = 0.0
                 continue
 
-            # --- B. Zone Coverage Analysis ---
-
-            # 1. Gather points around the contact
-            # Use a slightly larger radius (1.2x) to ensure we capture the rim points
             search_radius = pad.safety_radius * 1.2
             [k, idx_neighbors, _] = pcd_tree.search_radius_vector_3d(
                 nearest_pt, search_radius
@@ -576,20 +525,17 @@ class VacuumGraspSampler(
 
             neighbors = all_points[idx_neighbors, :]
             ref_area = np.pi * (search_radius**2)
-            local_density_ref = k / ref_area  # Ex: 50.000 pts/m²
-            # 2. Transform points to Pad Local Frame
-            # P_local = (P_world - Pad_Center_World) @ R_cand
-            # This aligns the pad's normal (Z) with the world Z, allowing 2D projection.
+            local_density_ref = k / ref_area
+
             local_points_3d = (neighbors - world_pad_pos) @ R_cand
             filtered_local_points = local_points_3d[
                 np.abs(local_points_3d[:, 2]) <= pad.max_sealing_distance
             ]
 
-            # 3. Calculate Coverage
             zones_dict = pad.split_points_in_zones(filtered_local_points)
             if debug:
                 debug_pad_projection(pad, filtered_local_points, zones_dict)
-            # covered_zones = len(zones_dict)
+
             zones_areas = pad.zone_areas
             zone_scores = []
 
@@ -601,7 +547,6 @@ class VacuumGraspSampler(
                     zone_scores.append(0.0)
                     continue
 
-                # Score = real / expected
                 ratio = valid_count / expected_count
                 zone_scores.append(np.clip(ratio, 0, 1.0))
 
@@ -615,22 +560,19 @@ class VacuumGraspSampler(
         return aggregated_seal, pad_details
 
     def _aggregate_pad_scores(self, scores: List[float]) -> float:
-        """
-        Combines multiple pad scores based on the configuration method.
-        """
         if not scores:
             return 0.0
 
         method = self.config.score_aggregation_method
 
         if method == "min":
-            return min(scores)  # Safest
+            return min(scores)
         elif method == "mean":
-            return np.mean(scores)  # Tolerant
+            return np.mean(scores)
         elif method == "median":
-            return np.median(scores)  # Robust
+            return np.median(scores)
         else:
-            return min(scores)  # Fallback
+            return min(scores)
 
     # =========================================================================
     # Helpers
@@ -645,10 +587,10 @@ class VacuumGraspSampler(
 
     def _calculate_verticality(self, cand):
         z_axis = np.array([0, 0, 1])
-        normal = -cand.approach_vector  # Approach vector points INTO the object
+        normal = -cand.approach_vector
         dot = np.dot(normal, z_axis)
         angle_deg = np.degrees(np.arccos(np.clip(abs(dot), -1.0, 1.0)))
-        # Penalty: If the approach vector points downwards (dot < 0), we apply a decay factor to the verticality score to prefer grasps that approach from above.
+
         decay_factor = 0.6 if dot < 0 else 1.0
 
         if angle_deg > self.config.max_angle_deg:
@@ -667,7 +609,6 @@ class VacuumGraspSampler(
     def _mark_candidate_failed(self, cand, reason: str):
         cand.score = 0.0
         details = self._make_empty_score_details()
-        # Mark error in details as a list
         details["failure_reason"] = [reason]
         cand.score_details = details
 
@@ -679,88 +620,53 @@ class VacuumGraspSampler(
             torque=0.0,
             raw_angle_deg=0.0,
             pad_scores={},
-            failure_reason=[],  # Initialize as empty list
+            failure_reason=[],
         )
-        # =========================================================================
 
+    # =========================================================================
     # Visualization
     # =========================================================================
+
     def visualize_grasp(
         self,
         pcd: o3d.geometry.PointCloud,
         grasp: GraspCandidate,
         show_safety_volume: bool = False,
     ):
-        """
-        Visualizes the grasp candidate in Open3D.
-
-        Handles the semantic distinction between 'Approach Vector' (motion direction, IN)
-        and 'Gripper Body Z-Axis' (geometry direction, OUT).
-        """
         geometries = []
 
-        # 1. Ghost Object (Context)
-        # Create a grey copy of the point cloud to serve as the background object.
         pcd_copy = copy.deepcopy(pcd)
-        pcd_copy.paint_uniform_color([0.7, 0.7, 0.7])  # Light Grey
+        pcd_copy.paint_uniform_color([0.7, 0.7, 0.7])
         geometries.append(pcd_copy)
 
-        # 2. Gripper Geometry
         if show_safety_volume:
-            # --- SAFETY VOLUME VISUALIZATION ---
-
-            # CRITICAL GEOMETRIC FIX:
-            # The 'grasp.approach_vector' points INTO the object (motion direction).
-            # However, the 'generate_safety_collision_mesh' expects a vector pointing
-            # along the gripper's body (Z+), which points OUT of the object.
-            #
-            # Solution: We extract the Z-axis (3rd column) from the rotation matrix.
-            # This represents the actual physical direction of the gripper's body.
             body_direction = grasp.transform[:3, 2]
 
-            # Generate the swept volume (Pads + Body Tube)
             mesh_trimesh = self.gripper.generate_safety_collision_mesh(
                 contact_point=grasp.contact_point,
-                surface_normal=body_direction,  # Points OUT (along the body tube)
+                surface_normal=body_direction,
                 approach_distance=self.config.approach_distance,
             )
 
-            # Convert Trimesh -> Open3D for visualization
             mesh_o3d = gu.trimesh_to_open3d(mesh_trimesh)
-            mesh_o3d.paint_uniform_color([0, 0, 1])  # Solid Blue to indicate "Safety"
-
-            # Note: generate_safety_collision_mesh returns a mesh already in World Coordinates,
-            # so no .transform() is needed here.
-
+            mesh_o3d.paint_uniform_color([0, 0, 1])
         else:
-            # --- VISUAL MESH VISUALIZATION ---
-
-            # Generate the detailed visual mesh (from CAD or procedural)
-            # This mesh is created at the Origin (0,0,0) with the body pointing +Z.
             wrapper = self.gripper.generate_collision_mesh()
             raw_geom = wrapper.geometry
 
-            # Ensure we have an Open3D object (handle Trimesh inputs)
             if isinstance(raw_geom, trimesh.Trimesh):
                 mesh_o3d = gu.trimesh_to_open3d(raw_geom)
             else:
                 mesh_o3d = copy.deepcopy(raw_geom)
 
-            # Apply the Grasp Pose.
-            # Since 'grasp.transform' aligns the local Z+ (Body) with the World Normal (Out),
-            # the gripper will correctly point away from the object.
             mesh_o3d.transform(grasp.transform)
 
         geometries.append(mesh_o3d)
 
-        # 3. Coordinate Frame (TCP)
-        # Red: X (Tangent) | Green: Y (Tangent) | Blue: Z (Body Axis / Normal)
-        # The Blue arrow will point OUT of the object.
         frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
         frame.transform(grasp.transform)
         geometries.append(frame)
 
-        # 4. Draw
         o3d.visualization.draw_geometries(
             geometries, window_name=f"Grasp Visualization - Score: {grasp.score:.3f}"
         )
@@ -772,21 +678,16 @@ class VacuumGraspSampler(
         relative_scale: bool = False,
         valid_only: bool = True,
     ):
-        """
-        Visualizes candidates as a colored point cloud based on score.
-        """
         cands = self.valid_candidates if valid_only else self.candidates
         if not cands:
             print("[Visualizer] No candidates.")
             return
 
         geometries = []
-        # Background Ghost Object
         pcd_ghost = copy.deepcopy(pcd)
         pcd_ghost.paint_uniform_color([0.8, 0.8, 0.8])
         geometries.append(pcd_ghost)
 
-        # Extract Values
         points = []
         raw_values = []
 
@@ -798,7 +699,6 @@ class VacuumGraspSampler(
                 val = c.score_details.get(attribute, 0.0)
             raw_values.append(val)
 
-        # Coloring Logic
         if relative_scale and len(raw_values) > 0:
             v_min, v_max = min(raw_values), max(raw_values)
             span = v_max - v_min
@@ -809,7 +709,6 @@ class VacuumGraspSampler(
         else:
             final_scores = [max(0.0, min(1.0, v)) for v in raw_values]
 
-        # Generate Heatmap
         heatmap_pcd = gu.create_score_heatmap_pcd(points, final_scores)
         geometries.append(heatmap_pcd)
 
@@ -820,28 +719,22 @@ class VacuumGraspSampler(
     def debug_specific_grasp(
         self, pcd: o3d.geometry.PointCloud, candidate: GraspCandidate
     ):
-        """
-        Forces the evaluation of a single candidate with all debug flags active.
-        """
-
         all_points = np.asarray(pcd.points)
         all_normals = np.asarray(pcd.normals)
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
         com_xy, max_torque_arm = self._calculate_global_stats(pcd, all_points)
 
-        # 3. Execute evaluation (this will trigger Matplotlib plots)
         print(f"--- Debugging Grasp at {candidate.contact_point} ---")
         self._evaluate_single_candidate(
             candidate, pcd_tree, all_points, all_normals, com_xy, max_torque_arm, True
         )
 
-        # 4. Show the grasp in 3D for reference
         self.visualize_grasp(pcd, candidate, show_safety_volume=True)
 
     def _debug_raycasting(self, pcd, rays_list, t_hits, radius):
         """
         Visualizador espetacular para o Raycasting!
-        Mostra a nuvem, os raios, os pontos de impacto e o infame teto do Convex Hull.
+        Mostra a nuvem, os raios, os pontos de impacto e a malha gerada (seja bpa, alpha, etc).
         """
         import copy
 
@@ -852,11 +745,10 @@ class VacuumGraspSampler(
         pcd_vis.paint_uniform_color([0.4, 0.4, 0.4])
         geometries.append(pcd_vis)
 
-        # 2. O Infame Convex Hull (Laranja em Wireframe) - O Teto fantasma!
-        hull_mesh, _ = pcd.compute_convex_hull()
-        hull_ls = o3d.geometry.LineSet.create_from_triangle_mesh(hull_mesh)
-        hull_ls.paint_uniform_color([1.0, 0.5, 0.0])  # Laranja
-        geometries.append(hull_ls)
+        # 2. Em vez do Convex Hull, chama a geração real do hull que você configurou para vermos a verdade!
+        scene = gu.create_raycasting_scene(
+            pcd, hull_type=self.config.raycasting_hull_type, debug_visualize=False
+        )
 
         # 3. Os Raios (Verde se acertou, Vermelho se passou reto)
         points = []
@@ -871,7 +763,7 @@ class VacuumGraspSampler(
             if np.isinf(t):  # Raio perdeu-se no espaço
                 end_pt = origin + dir_vec * (radius * 1.5)
                 color = [0.8, 0.2, 0.2]  # Vermelho
-            else:  # Raio bateu no Convex Hull!
+            else:  # Raio bateu na malha
                 end_pt = origin + dir_vec * t
                 color = [0.2, 0.8, 0.2]  # Verde
                 hit_points.append(end_pt)
@@ -894,9 +786,12 @@ class VacuumGraspSampler(
             hits_pcd.paint_uniform_color([0.0, 0.0, 1.0])
             geometries.append(hits_pcd)
 
-        print("[Debug] Abrindo Visualizador de Raycasting...")
+        print(
+            f"[Debug] Abrindo Visualizador de Raycasting ({self.config.raycasting_hull_type})..."
+        )
         o3d.visualization.draw_geometries(
-            geometries, window_name="Raycasting Debug - O Mistério do Convex Hull"
+            geometries,
+            window_name=f"Raycasting Debug - {self.config.raycasting_hull_type}",
         )
 
 
@@ -906,7 +801,6 @@ def debug_pad_projection(pad, local_points_3d, zone_dict):
     """
     plt.figure(figsize=(6, 6))
 
-    # 1. Plot all projected points (X, Y)
     plt.scatter(
         local_points_3d[:, 0],
         local_points_3d[:, 1],
@@ -916,22 +810,18 @@ def debug_pad_projection(pad, local_points_3d, zone_dict):
         label="All points",
     )
 
-    # 2. Highlight points by zone
     colors = ["red", "green", "blue", "yellow"]
     for i, (zone_name, pts) in enumerate(zone_dict.items()):
         if len(pts) > 0:
             plt.scatter(pts[:, 0], pts[:, 1], s=5, label=f"Zone: {zone_name}")
 
-    # 3. Draw the physical limits of the suction cup (circles)
     theta = np.linspace(0, 2 * np.pi, 100)
-    # External circle
     plt.plot(
         pad.safety_radius * np.cos(theta),
         pad.safety_radius * np.sin(theta),
         "k--",
         label="External Radius",
     )
-    # If there is an internal radius (suction cup hole)
     if hasattr(pad, "inner_radius"):
         plt.plot(
             pad.inner_radius * np.cos(theta),

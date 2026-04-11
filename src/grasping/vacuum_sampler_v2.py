@@ -1,8 +1,8 @@
 import copy
-import matplotlib.pyplot as plt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Literal, TypedDict
 
+import matplotlib.pyplot as plt
 import numpy as np
 import open3d as o3d
 import trimesh
@@ -12,7 +12,11 @@ from src.grasping.base_sampler import BaseGraspSampler, GraspCandidate
 from src.grasping.strategies import STRATEGY_REGISTRY
 from src.grippers.vacuum_gripper_v2 import VacuumGripper
 
+
 # --- Types & Config ---
+class RaycastingPatternDict(TypedDict, total=False):
+    sphere: int
+    top_down: int
 
 
 class VacuumScoreDetails(TypedDict):
@@ -37,11 +41,12 @@ class VacuumSamplerConfig:
     """
 
     # Sampling Parameters
-    num_samples: int = 200
-
+    raycasting_samples: RaycastingPatternDict = field(
+        default_factory=lambda: {"sphere": 100, "top_down": 150}
+    )
     # --- Raycasting & Mesh Generation ---
     raycasting_hull_type: Literal["convex", "bpa", "poisson", "alpha"] = "alpha"
-    raycasting_hemisphere_only: bool = True
+    raycasting_hemisphere_only: bool = False
 
     # Distance in meters that the gripper will "reach into" the object during collision checks.
     approach_distance: float = 0.10
@@ -51,7 +56,7 @@ class VacuumSamplerConfig:
     # Collision volume shape: "bounding_box_shape", "extended_body_shape", "gripper_shape"
     safety_volume_shape: Literal[
         "bounding_box_shape", "extended_body_shape", "gripper_shape"
-    ] = "bounding_box_shape"
+    ] = "extended_body_shape"
 
     # --- Orientation Strategy ---
     # "uniform": Rotate gripper around the normal vector (for asymmetric grippers).
@@ -66,6 +71,7 @@ class VacuumSamplerConfig:
 
     # --- Thresholds ---
     max_angle_deg: float = 45.0
+    min_seal_threshold: float = 0.5
     min_score: float = 0.5
 
     # --- Weights ---
@@ -193,18 +199,38 @@ class VacuumGraspSampler(
             self._process_single_hit(t_dist, ray_origin, ray_dir, pcd, pcd_tree)
 
     def _create_rays_for_pcd(self, pcd: o3d.geometry.PointCloud) -> List[np.ndarray]:
+        rays_list = []
+
         min_bound = pcd.get_min_bound()
         max_bound = pcd.get_max_bound()
-        center = (min_bound + max_bound) / 2
-        max_dim = np.max(max_bound - min_bound)
-        radius = (max_dim / 2) * 1.5
 
-        return gu.generate_inward_rays_from_sphere(
-            center,
-            radius,
-            self.config.num_samples,
-            hemisphere_only=self.config.raycasting_hemisphere_only,
-        )
+        samples_sphere = self.config.raycasting_samples.get("sphere", 0)
+        samples_top = self.config.raycasting_samples.get("top_down", 0)
+
+        # --- 1. Sphere ---
+        if samples_sphere > 0:
+            center = (min_bound + max_bound) / 2
+            max_dim = np.max(max_bound - min_bound)
+            radius = (max_dim / 2) * 1.5
+
+            sphere_rays = gu.generate_inward_rays_from_sphere(
+                center,
+                radius,
+                samples_sphere,
+                hemisphere_only=self.config.raycasting_hemisphere_only,
+            )
+            rays_list.extend(sphere_rays)
+
+        # --- 2. Top-Down ---
+        if samples_top > 0:
+            top_down_rays = gu.generate_top_down_rays(
+                min_bound=min_bound,
+                max_bound=max_bound,
+                num_samples=samples_top,
+            )
+            rays_list.extend(top_down_rays)
+
+        return rays_list
 
     def _process_single_hit(self, t_dist, ray_origin, ray_dir, pcd, pcd_tree):
         """
@@ -408,9 +434,18 @@ class VacuumGraspSampler(
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
         com_xy, max_torque_arm = self._calculate_global_stats(pcd, all_points)
 
+        # Calculate the resolution (virtual voxel size) once per point cloud
+        distances = pcd.compute_nearest_neighbor_distance()
+        avg_point_spacing = np.mean(np.asarray(distances))
         for cand in self.candidates:
             self._evaluate_single_candidate(
-                cand, pcd_tree, all_points, all_normals, com_xy, max_torque_arm
+                cand,
+                pcd_tree,
+                all_points,
+                all_normals,
+                com_xy,
+                max_torque_arm,
+                avg_point_spacing,
             )
 
     def debug_candidates(self, pcd: o3d.geometry.PointCloud, debug_idx: List[int]):
@@ -442,6 +477,7 @@ class VacuumGraspSampler(
         all_normals: np.ndarray,
         com_xy: np.ndarray,
         max_torque_arm: float,
+        avg_point_spacing: float,
         debug: bool = False,
     ) -> None:
         fail_reasons: List[str] = []
@@ -465,10 +501,16 @@ class VacuumGraspSampler(
         cand.contact_point = adjusted_pose[:3, 3]
 
         s_seal, pad_scores_dict = self._evaluate_suction_seal(
-            cand, contact_points, pcd_tree, all_points, all_normals, debug
+            cand,
+            contact_points,
+            pcd_tree,
+            all_points,
+            all_normals,
+            debug,
+            avg_point_spacing,
         )
 
-        if s_seal <= 0.0:
+        if s_seal <= self.config.min_seal_threshold:
             is_failed = True
             fail_reasons.append("bad_seal")
             if not self.config.debug_score:
@@ -494,13 +536,23 @@ class VacuumGraspSampler(
         )
 
     def _evaluate_suction_seal(
-        self, cand, contact_points, pcd_tree, all_points, all_normals, debug
+        self,
+        cand,
+        contact_points,
+        pcd_tree,
+        all_points,
+        all_normals,
+        debug,
+        avg_point_spacing,
     ):
         pad_scores = []
         pad_details = {}
 
         R_cand = cand.transform[:3, :3]
         TCP_pos = cand.contact_point
+
+        # 1. Define the global baseline using the actual point spacing of the cloud
+        global_density = 1.0 / (avg_point_spacing**2)
 
         for i, pad in enumerate(self.gripper.config.pads):
             nearest_pt = contact_points[i]
@@ -513,19 +565,22 @@ class VacuumGraspSampler(
                 pad_details[pad.name] = 0.0
                 continue
 
-            search_radius = pad.safety_radius * 1.2
+            search_radius = pad.safety_radius * 1.05
             [k, idx_neighbors, _] = pcd_tree.search_radius_vector_3d(
                 nearest_pt, search_radius
             )
 
-            if k < 30:
+            # --- COARSE FILTER (Early-Reject) ---
+            search_area = np.pi * (search_radius**2)
+            expected_total_points = global_density * search_area
+
+            # If it found less than 15% of the expected points based on the global baseline, fail immediately
+            if k < (0.05 * expected_total_points):
                 pad_scores.append(0.0)
                 pad_details[pad.name] = 0.0
                 continue
 
             neighbors = all_points[idx_neighbors, :]
-            ref_area = np.pi * (search_radius**2)
-            local_density_ref = k / ref_area
 
             local_points_3d = (neighbors - world_pad_pos) @ R_cand
             filtered_local_points = local_points_3d[
@@ -539,10 +594,16 @@ class VacuumGraspSampler(
             zones_areas = pad.zone_areas
             zone_scores = []
 
+            # --- FINE FILTER (Zone Evaluation) ---
             for zone_name, pts in zones_dict.items():
                 target_area = zones_areas.get(zone_name, 0.0)
-                expected_count = local_density_ref * target_area
+
+                # The expected point count requires the global density, not the local one
+                expected_count = global_density * target_area
                 valid_count = len(pts)
+                print(
+                    f"[Debug Sealing] Expected: {expected_count:.1f} | Valid: {valid_count} | Spacing: {avg_point_spacing:.4f}"
+                )
                 if valid_count == 0:
                     zone_scores.append(0.0)
                     continue
@@ -554,10 +615,76 @@ class VacuumGraspSampler(
             pad_scores.append(current_pad_score)
             pad_details[pad.name] = current_pad_score
 
+        # Aggregate pad scores using the configured method (min, mean, median)
         aggregated_seal = self._aggregate_pad_scores(pad_scores)
-        aggregated_seal = np.min(pad_scores)
 
         return aggregated_seal, pad_details
+
+    # def _evaluate_suction_seal(
+    #     self, cand, contact_points, pcd_tree, all_points, all_normals, debug
+    # ):
+    #     pad_scores = []
+    #     pad_details = {}
+    #
+    #     R_cand = cand.transform[:3, :3]
+    #     TCP_pos = cand.contact_point
+    #
+    #     for i, pad in enumerate(self.gripper.config.pads):
+    #         nearest_pt = contact_points[i]
+    #
+    #         world_pad_pos = TCP_pos + (R_cand @ pad.offset)
+    #         gap = np.linalg.norm(world_pad_pos - nearest_pt)
+    #
+    #         if gap > pad.max_sealing_distance:
+    #             pad_scores.append(0.0)
+    #             pad_details[pad.name] = 0.0
+    #             continue
+    #
+    #         search_radius = pad.safety_radius * 1.2
+    #         [k, idx_neighbors, _] = pcd_tree.search_radius_vector_3d(
+    #             nearest_pt, search_radius
+    #         )
+    #
+    #         if k < 30:
+    #             pad_scores.append(0.0)
+    #             pad_details[pad.name] = 0.0
+    #             continue
+    #
+    #         neighbors = all_points[idx_neighbors, :]
+    #         ref_area = np.pi * (search_radius**2)
+    #         local_density_ref = k / ref_area
+    #
+    #         local_points_3d = (neighbors - world_pad_pos) @ R_cand
+    #         filtered_local_points = local_points_3d[
+    #             np.abs(local_points_3d[:, 2]) <= pad.max_sealing_distance
+    #         ]
+    #
+    #         zones_dict = pad.split_points_in_zones(filtered_local_points)
+    #         if debug:
+    #             debug_pad_projection(pad, filtered_local_points, zones_dict)
+    #
+    #         zones_areas = pad.zone_areas
+    #         zone_scores = []
+    #
+    #         for zone_name, pts in zones_dict.items():
+    #             target_area = zones_areas.get(zone_name, 0.0)
+    #             expected_count = local_density_ref * target_area
+    #             valid_count = len(pts)
+    #             if valid_count == 0:
+    #                 zone_scores.append(0.0)
+    #                 continue
+    #
+    #             ratio = valid_count / expected_count
+    #             zone_scores.append(np.clip(ratio, 0, 1.0))
+    #
+    #         current_pad_score = min(zone_scores) if zone_scores else 0.0
+    #         pad_scores.append(current_pad_score)
+    #         pad_details[pad.name] = current_pad_score
+    #
+    #     aggregated_seal = self._aggregate_pad_scores(pad_scores)
+    #     aggregated_seal = np.min(pad_scores)
+    #
+    #     return aggregated_seal, pad_details
 
     def _aggregate_pad_scores(self, scores: List[float]) -> float:
         if not scores:
@@ -594,7 +721,7 @@ class VacuumGraspSampler(
         decay_factor = 0.6 if dot < 0 else 1.0
 
         if angle_deg > self.config.max_angle_deg:
-            print("[Debug] Candidate failed verticality check: angle_deg =", angle_deg)
+            # print("[Debug] Candidate failed verticality check: angle_deg =", angle_deg)
             return 0.0, angle_deg
 
         s_vert = 1.0 - (angle_deg / self.config.max_angle_deg)

@@ -491,6 +491,59 @@ class GenericGeometry:
         return clean_pcd
 
     @inplace_result
+    def remove_outliers_dynamic_sor(
+        self, std_ratio: float = 3.0, inplace: bool = False
+    ):
+        """
+        Dynamically calculates the number of neighbors based on the cloud size
+        to keep the statistical outlier removal scale-invariant.
+        """
+        num_points = len(self.geometry.points)
+
+        # Calculate 1% of the total points
+        dynamic_neighbors = int(num_points * 0.01)
+
+        # Clamp the value between a safe minimum (20) and a safe maximum (100)
+        # to prevent performance drops or excessive corrosion on small/large clouds
+        nb_neighbors = max(20, min(100, dynamic_neighbors))
+
+        cl, ind = self.geometry.remove_statistical_outlier(
+            nb_neighbors=nb_neighbors, std_ratio=std_ratio
+        )
+
+        cleaned_pcd = self.geometry.select_by_index(ind)
+
+        if inplace:
+            self.geometry = cleaned_pcd
+
+        return cleaned_pcd
+
+    @inplace_result
+    def remove_outliers_physical(self, min_neighbors: int = 5, inplace: bool = False):
+        """
+        Uses Radius Outlier Removal based on the actual physical spacing of the point cloud.
+        Excellent for preserving sharp edges like CubeSats or mechanical parts.
+        """
+        # 1. Discover the "tile size" of the current cloud
+        distances = self.geometry.compute_nearest_neighbor_distance()
+        avg_spacing = np.mean(np.asarray(distances))
+
+        # 2. Define the search radius as exactly 3 times the average spacing
+        # If a point doesn't have neighbors within a 3-tile radius, it's floating dust.
+        dynamic_radius = avg_spacing * 3.0
+
+        cl, ind = self.geometry.remove_radius_outlier(
+            nb_points=min_neighbors, radius=dynamic_radius
+        )
+
+        cleaned_pcd = self.geometry.select_by_index(ind)
+
+        if inplace:
+            self.geometry = cleaned_pcd
+
+        return cleaned_pcd
+
+    @inplace_result
     def cluster_dbscan(
         self, eps: float = 0.02, min_points: int = 10, num_points: int = 5000
     ) -> o3d.geometry.PointCloud:

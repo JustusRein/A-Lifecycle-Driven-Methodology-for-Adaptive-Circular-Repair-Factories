@@ -8,7 +8,7 @@ gripper:
 
   # --- PADS CONFIGURATION ---
   # Z-height of the TCP (length of the stem + relaxed cup)
-  pad_height: 0.02
+  pad_height: 0.015
   pads:
     # --- LEFT SUCTION CUP ---
     - type: "circle"            # Strictly "circle" or "rect"
@@ -16,7 +16,7 @@ gripper:
       # Position: 4cm to the left of the center
       offset: [-0.013, 0.0, 0.0]
       radius: 0.010             # 15mm radius (30mm diameter)
-      thickness: 0.004          # Absolute thickness of the ring
+      thickness: 0.003          # Absolute thickness of the ring
       relative_thickness: false # Thickness mode (absolute or relative)
       max_sealing_distance: 0.005
       zones:
@@ -28,7 +28,7 @@ gripper:
       # Position: 4cm to the right of the center
       offset: [0.013, 0.0, 0.0]
       radius: 0.010
-      thickness: 0.004          # Absolute thickness
+      thickness: 0.003          # Absolute thickness
       relative_thickness: false # Absolute thickness setting
       max_sealing_distance: 0.005
       zones:

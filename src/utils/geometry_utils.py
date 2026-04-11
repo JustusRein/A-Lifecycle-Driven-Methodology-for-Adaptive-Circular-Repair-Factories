@@ -1,17 +1,16 @@
 import copy
-from typing import Literal, TypedDict, Union
-from typing import List, Optional, Tuple
+from typing import List, Literal, Optional, Tuple, TypedDict, Union
 
 import cv2
-from multipledispatch.dispatcher import Dispatcher
 import numpy as np
 import open3d as o3d
 import trimesh
+from multipledispatch.dispatcher import Dispatcher
 from shapely.geometry import Polygon
 
 from src.utils.types import (
-    PointCloud,
     DimensionsReport,
+    PointCloud,
 )
 
 
@@ -1156,6 +1155,60 @@ def generate_fibonacci_sphere_points(n_samples: int) -> np.ndarray:
         points.append([x, y, z])
 
     return np.array(points)
+
+
+def generate_top_down_rays(
+    min_bound: np.ndarray,
+    max_bound: np.ndarray,
+    num_samples: int,
+    margin_ratio: float = 0.01,
+    z_offset: float = 0.15,
+) -> List[np.ndarray]:
+    """
+    Generates a grid of downward-pointing rays (flat ceiling approach) from above a bounding box.
+
+    Args:
+        min_bound: Minimum [x, y, z] coordinates of the target volume.
+        max_bound: Maximum [x, y, z] coordinates of the target volume.
+        num_samples: Approximate total number of rays to generate.
+        margin_ratio: Percentage to expand the XY sampling area beyond the bounding box.
+        z_offset: Distance in meters above the max_bound Z value to origin the rays.
+
+    Returns:
+        List of rays, each as a 1D numpy array: [origin_x, origin_y, origin_z, dir_x, dir_y, dir_z]
+    """
+    if num_samples <= 0:
+        return []
+
+    # Expand the XY bounds slightly to ensure edge coverage
+    margin_x = (max_bound[0] - min_bound[0]) * margin_ratio
+    margin_y = (max_bound[1] - min_bound[1]) * margin_ratio
+
+    x_min, x_max = min_bound[0] - margin_x, max_bound[0] + margin_x
+    y_min, y_max = min_bound[1] - margin_y, max_bound[1] + margin_y
+
+    # The ray origins are placed at a safe offset above the highest point
+    ray_z = max_bound[2] + z_offset
+
+    # Calculate a square grid size that approximates num_samples
+    grid_side = int(np.sqrt(num_samples))
+    grid_side = max(2, grid_side)  # Ensure at least a 2x2 grid
+
+    x_steps = np.linspace(x_min, x_max, grid_side)
+    y_steps = np.linspace(y_min, y_max, grid_side)
+
+    xv, yv = np.meshgrid(x_steps, y_steps)
+    xv, yv = xv.flatten(), yv.flatten()
+
+    # All rays point straight down: vector [0, 0, -1]
+    ray_dir = np.array([0.0, 0.0, -1.0])
+
+    rays_list = []
+    for x, y in zip(xv, yv):
+        ray = np.concatenate(([x, y, ray_z], ray_dir))
+        rays_list.append(ray)
+
+    return rays_list
 
 
 def generate_inward_rays_from_sphere(

@@ -15,7 +15,6 @@ from shapely.validation import explain_validity, make_valid  # Shapely>=2.0
 from shapely import set_precision
 import os
 
-
 # -------------------- Define the gripper ----------------
 
 # For unit change from mm to m
@@ -595,7 +594,9 @@ o3d.visualization.draw_geometries(
 original_points = np.asarray(pcd_target_in_scan.points)
 original_indices = np.arange(len(original_points))
 # ----------------  initialize parameters for plane extraction ----------------
-plane_indices_list = []  # for each plane, the indices of its points in the original point cloud
+plane_indices_list = (
+    []
+)  # for each plane, the indices of its points in the original point cloud
 plane_colors = []  # for each plane, its color
 plane_models = []  # for each plane, its model (ax+by+cz+d)
 plane_normals = []  # for each plane, its normal vector
@@ -937,7 +938,7 @@ for iii in range(len(paired_planes)):
         f"\n\n----------------------------------------\n-------- Processing pair: {counter}/{len(paired_planes)} --------\n----------------------------------------"
     )
 
-    (mmm, nnn) = paired_planes[iii]
+    mmm, nnn = paired_planes[iii]
     plane_i_points = np.asarray(
         pcd_target_in_scan.select_by_index(plane_indices_list[mmm]).points
     )

@@ -24,23 +24,23 @@ class ParallelScoreDetails(TypedDict):
 
 @dataclass
 class ParallelSamplerConfig:
-    # Parâmetros de tolerância e distâncias
+    # Tolerance and distance parameters
     plane_angle_thresh: float = 5.0
     min_remaining_points: int = 50
-    min_points_per_plane: int = 50  # Usado como fallback se o cálculo dinâmico falhar
-    distance_threshold: float = 0.001  # 1mm em metros
+    min_points_per_plane: int = 50  # Used as fallback if dynamic calculation fails
+    distance_threshold: float = 0.001  # 1mm in meters
     max_planes: int = 200
     margin_points_between_planes: float = 0.001
 
-    # Desenho e visualização
+    # Drawing and visualization
     plt_graphic_padding: float = 0.01
     contour_image_padding: int = 10
 
-    # Critério de sucesso
+    # Success criteria
     min_score: float = 0.3
 
     # ==========================================
-    # Flags de Visualização (Para Debugging)
+    # Visualization Flags (For Debugging)
     # ==========================================
     no_image: bool = False
     show_all_planes_and_normals: bool = True
@@ -58,8 +58,8 @@ class ParallelGraspSampler(
     BaseGraspSampler[ParallelGripper, ParallelSamplerConfig, ParallelScoreDetails]
 ):
     """
-    Sampler para Garras Paralelas.
-    Implementação estruturada, tipada e comentada da lógica original do main_script.py.
+    Sampler for Parallel Jaw Grippers.
+    Structured, typed, and documented implementation of the original main_script.py logic.
     """
 
     def __init__(
@@ -71,32 +71,32 @@ class ParallelGraspSampler(
 
     def sample_grasps(self, pcd: o3d.geometry.PointCloud) -> List[GraspCandidate]:
         """
-        Método principal que coordena o pipeline de extração de pegas.
+        Main method coordinating the grasp extraction pipeline.
         """
         self.clear_candidates()
         cfg = self.config
         g_cfg = self.gripper.config
 
         # =================================================================
-        # CÁLCULO DINÂMICO DO MIN_POINTS_PER_PLANE
+        # DYNAMIC CALCULATION OF MIN_POINTS_PER_PLANE
         # =================================================================
         distances = np.asarray(pcd.compute_nearest_neighbor_distance())
         avg_dist = np.mean(distances) if len(distances) > 0 else 0.001
-        area_por_ponto = avg_dist**2
+        area_per_point = avg_dist**2
 
-        # Área física mínima (Área da ponta do dedo do Franka)
-        area_dedo = g_cfg.z_pg * g_cfg.b_pg
-        min_area_necessaria = area_dedo * 0.5
+        # Minimum physical area (Area of the Franka finger tip)
+        finger_area = g_cfg.z_pg * g_cfg.b_pg
+        min_required_area = finger_area * 0.5
 
-        dynamic_min_points = int(min_area_necessaria / area_por_ponto)
+        dynamic_min_points = int(min_required_area / area_per_point)
         dynamic_min_points = np.clip(dynamic_min_points, 50, len(pcd.points) // 10)
 
-        print(f"🧠 [Auto-Tuning] Distância média: {avg_dist:.4f}m")
+        print(f"🧠 [Auto-Tuning] Average distance: {avg_dist:.4f}m")
         print(
-            f"🧠 [Auto-Tuning] Limite dinâmico definido para: {dynamic_min_points} pontos/plano"
+            f"🧠 [Auto-Tuning] Dynamic limit defined: {dynamic_min_points} points/plane"
         )
 
-        # Variáveis derivadas da cinemática da garra
+        # Variables derived from gripper kinematics
         y_pg = max(
             g_cfg.q_pg + 2 * g_cfg.r_pg,
             g_cfg.h_pg + 2 * g_cfg.k_pg,
@@ -105,10 +105,10 @@ class ParallelGraspSampler(
         rd = max(g_cfg.ra, g_cfg.rb)
 
         # =================================================================
-        # 1. SEGMENTAÇÃO E FUSÃO DE PLANOS (A ESSÊNCIA DO SCRIPT ORIGINAL)
+        # 1. PLANE SEGMENTATION AND MERGING
         # =================================================================
         print(
-            f"🚀 Iniciando extração de planos (Min pts/plano: {dynamic_min_points})..."
+            f"🚀 Initiating plane extraction (Min pts/plane: {dynamic_min_points})..."
         )
         pcd_target = copy.deepcopy(pcd)
         original_points = np.asarray(pcd_target.points)
@@ -121,7 +121,7 @@ class ParallelGraspSampler(
 
         rest_pcd = copy.deepcopy(pcd_target)
 
-        # 1.1 Extração Bruta (RANSAC Clássico)
+        # 1.1 Raw Extraction (Classic RANSAC)
         for _ in range(cfg.max_planes):
             if len(rest_pcd.points) < cfg.min_remaining_points:
                 break
@@ -135,7 +135,7 @@ class ParallelGraspSampler(
             except RuntimeError:
                 break
 
-            # A ESSÊNCIA: Parar a extração assim que o plano encontrado for lixo/pequeno demais
+            # CORE LOGIC: Stop extraction as soon as the found plane is junk/too small
             if len(inliers) < dynamic_min_points:
                 break
 
@@ -148,13 +148,13 @@ class ParallelGraspSampler(
 
             plane_colors.append([random.random(), random.random(), random.random()])
 
-            # Atualiza a nuvem restante
+            # Update remaining cloud
             rest_pcd = rest_pcd.select_by_index(inliers, invert=True)
             original_indices = np.delete(original_indices, inliers)
 
-        print(f"   -> RANSAC extraiu {len(plane_models)} planos brutos.")
+        print(f"   -> RANSAC extracted {len(plane_models)} raw planes.")
 
-        # 1.2 Fusão de Planos Coplanares
+        # 1.2 Coplanar Plane Merging
         all_points_xyz = np.asarray(pcd_target.points)
         plane_models, plane_normals, plane_indices_list = self._merge_coplanar_planes(
             p_models=plane_models,
@@ -166,7 +166,7 @@ class ParallelGraspSampler(
         )
 
         print(
-            f"   -> Após a fusão, restam {len(plane_normals)} planos estruturais consolidados."
+            f"   -> After merging, {len(plane_normals)} consolidated structural planes remain."
         )
 
         if cfg.show_all_planes_and_normals and not cfg.no_image:
@@ -180,7 +180,7 @@ class ParallelGraspSampler(
             )
 
         # =================================================================
-        # 2. AGRUPAMENTO POR PARALELISMO
+        # 2. GROUPING BY PARALLELISM
         # =================================================================
         parallel_groups = self._group_parallel_planes(
             plane_normals, cfg.plane_angle_thresh
@@ -203,7 +203,7 @@ class ParallelGraspSampler(
                 [colored_pcd_groups], window_name="2. Parallel Clustering"
             )
 
-        # Criar os Pares a partir dos Grupos
+        # Create pairs from Groups
         paired_planes: List[Tuple[int, int]] = []
         for group in parallel_groups:
             n = len(group)
@@ -212,11 +212,11 @@ class ParallelGraspSampler(
                     paired_planes.append((group[i], group[j]))
 
         # =================================================================
-        # 3. AVALIAÇÃO DE CADA PAR
+        # 3. EVALUATION OF EACH PAIR
         # =================================================================
         for count, (mmm, nnn) in enumerate(paired_planes):
             print(
-                f"\n-------- Avaliando Par: {count + 1}/{len(paired_planes)} --------"
+                f"\n-------- Evaluating Pair: {count + 1}/{len(paired_planes)} --------"
             )
 
             if cfg.show_plane_pairs and not cfg.no_image:
@@ -239,14 +239,14 @@ class ParallelGraspSampler(
             center_i = np.mean(plane_i_points, axis=0)
             center_j = np.mean(plane_j_points, axis=0)
 
-            # Restrição Cinemática
+            # Kinematic Constraint
             dist_plane = abs(np.dot(center_i - center_j, plane_normals[mmm]))
             print(
-                f"Distância entre planos: {dist_plane:.4f}m | Abertura Máx: {(g_cfg.f_pg - 2 * g_cfg.w_pg):.4f}m"
+                f"Distance between planes: {dist_plane:.4f}m | Max Opening: {(g_cfg.f_pg - 2 * g_cfg.w_pg):.4f}m"
             )
 
             if dist_plane < g_cfg.g_pg or dist_plane > (g_cfg.f_pg - 2 * g_cfg.w_pg):
-                print("Ignorado: Peça muito fina ou muito grossa para a garra.")
+                print("Ignored: Part too thin or too thick for the gripper.")
                 continue
 
             center_ij = (center_i + center_j) / 2
@@ -280,10 +280,10 @@ class ParallelGraspSampler(
             if cfg.show_plane_pair_and_proj_in_pcd and not cfg.no_image:
                 o3d.visualization.draw_geometries(
                     [pcd_orig_i, pcd_orig_j, pcd_proj_i, pcd_proj_j],
-                    window_name="4. Projeções no Centro",
+                    window_name="4. Center Projections",
                 )
 
-            # --- Camada P1 (Overlap) ---
+            # --- P1 Layer (Overlap) ---
             overlap_pcd_unfilter = self._extract_overlap_region(pcd_proj_i, pcd_proj_j)
             if overlap_pcd_unfilter is None:
                 continue
@@ -294,10 +294,10 @@ class ParallelGraspSampler(
             if cfg.show_proj_pts_p1 and not cfg.no_image:
                 o3d.visualization.draw_geometries(
                     [overlap_pcd.translate([0, 0, 0.00001])],
-                    window_name="5. Camada P1 (Overlap)",
+                    window_name="5. P1 Layer (Overlap)",
                 )
 
-            # --- Camada P2 (Corpo da Peça) ---
+            # --- P2 Layer (Object Body) ---
             pts_btwn_p2, pts_beside = self._select_points_between_planes(
                 pcd_target,
                 center_i,
@@ -313,10 +313,10 @@ class ParallelGraspSampler(
             ).remove_statistical_outlier(20, 1.0)
             if cfg.show_proj_pts_p2 and not cfg.no_image:
                 o3d.visualization.draw_geometries(
-                    [proj_pcd_p2], window_name="6. Camada P2"
+                    [proj_pcd_p2], window_name="6. P2 Layer"
                 )
 
-            # --- Camada P3 (Folga dos Dedos) ---
+            # --- P3 Layer (Finger Clearance) ---
             c_i_p3 = (
                 center_i
                 + (g_cfg.a_pg + g_cfg.w_pg + g_cfg.v_pg)
@@ -350,7 +350,7 @@ class ParallelGraspSampler(
                 o3d.utility.Vector3dVector(proj_p3)
             ).remove_statistical_outlier(50, 2.0)
 
-            # --- Camada P4 (Folga da Base) ---
+            # --- P4 Layer (Base Clearance) ---
             c_i_p4 = center_ij + (y_pg / 2) * plane_normals[mmm] * dist_dir_i
             c_j_p4 = center_ij + (y_pg / 2) * plane_normals[nnn] * dist_dir_j
             p4_i, pts_beside = self._select_points_between_planes(
@@ -374,7 +374,7 @@ class ParallelGraspSampler(
                 o3d.utility.Vector3dVector(proj_p4)
             ).remove_statistical_outlier(50, 3.0)
 
-            # --- Camada P5 (Folga do Braço) ---
+            # --- P5 Layer (Arm Clearance) ---
             c_i_p5 = center_ij + ((rd + g_cfg.rj) / 2) * plane_normals[mmm] * dist_dir_i
             c_j_p5 = center_ij + ((rd + g_cfg.rj) / 2) * plane_normals[nnn] * dist_dir_j
             p5_i, _ = self._select_points_between_planes(
@@ -396,7 +396,7 @@ class ParallelGraspSampler(
             )
             proj_pcd_p5 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(proj_p5))
 
-            # --- Construção de Contornos OpenCV ---
+            # --- OpenCV Contour Construction ---
             pca = PCA(n_components=3)
             pca.fit(np.asarray(pcd_target.points))
             dir1, dir2, center_pca = pca.components_[0], pca.components_[1], pca.mean_
@@ -417,7 +417,7 @@ class ParallelGraspSampler(
                 proj_pcd_p5, dir1, dir2, center_pca, is_p2=False
             )
 
-            # --- Limpeza de Geometria ---
+            # --- Geometry Cleanup ---
             poly_lists = [
                 [self._clean_geom(p) for p in poly_p1],
                 [self._clean_geom(p) for p in poly_p2],
@@ -426,7 +426,7 @@ class ParallelGraspSampler(
                 [self._clean_geom(p) for p in poly_p5],
             ]
 
-            # --- Geração do Grid TCP e Avaliação ---
+            # --- TCP Grid Generation and Evaluation ---
             tcp_box, test_grid_points = self._generate_grid_by_spacing(
                 segments_2d_p2,
                 normals_2d_p2,
@@ -446,7 +446,7 @@ class ParallelGraspSampler(
                 seg_dir = (pt2 - pt1) / np.linalg.norm(pt2 - pt1)
                 n_2d = np.array([-seg_dir[1], seg_dir[0]])
 
-                # Orientação baseada no referencial 2D original
+                # Orientation based on the original 2D reference frame
                 x_axis = seg_dir[0] * dir1 + seg_dir[1] * dir2
                 x_axis = x_axis / np.linalg.norm(x_axis)
                 z_axis = n_2d[0] * dir1 + n_2d[1] * dir2
@@ -485,7 +485,7 @@ class ParallelGraspSampler(
                     if any(p.intersects(rect4_geom) for p in poly_lists[4]):
                         continue
 
-                    # Sucesso! Registar o candidato
+                    # Success! Register the candidate
                     pt_3d = center_pca + pt[0] * dir1 + pt[1] * dir2
                     pose_4x4 = np.eye(4)
                     pose_4x4[:3, :3] = R
@@ -520,27 +520,27 @@ class ParallelGraspSampler(
             self.candidates, key=lambda x: x.score, reverse=True
         )
         print(
-            f"\n🏆 [ParallelSampler] Concluído! Total de pegas válidas: {len(self.valid_candidates)}"
+            f"\n🏆 [ParallelSampler] Completed! Total valid grasps: {len(self.valid_candidates)}"
         )
         return self.valid_candidates
 
     # =========================================================================
-    # FUNÇÕES AUXILIARES DE MATEMÁTICA E GEOMETRIA
+    # MATHEMATICAL AND GEOMETRIC AUXILIARY FUNCTIONS
     # =========================================================================
     @staticmethod
     def _normalize_plane(
         a: float, b: float, c: float, d: float
     ) -> Tuple[np.ndarray, float]:
-        """Garante que a normal do plano tem comprimento unitário."""
+        """Ensures the plane normal has unit length."""
         n = np.array([a, b, c], dtype=float)
         norm = np.linalg.norm(n)
         if norm == 0:
-            raise ValueError("Normal do plano inválida (comprimento zero).")
+            raise ValueError("Invalid plane normal (zero length).")
         return n / norm, d / norm
 
     @staticmethod
     def _angle_deg(n1: np.ndarray, n2: np.ndarray) -> float:
-        """Calcula o ângulo em graus entre dois vetores normais."""
+        """Calculates the angle in degrees between two normal vectors."""
         cosv = float(np.clip(np.dot(n1, n2), -1.0, 1.0))
         return np.degrees(np.arccos(cosv))
 
@@ -548,11 +548,11 @@ class ParallelGraspSampler(
     def _refit_plane_from_points(
         points_xyz: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Ajusta um novo plano matemático a um conjunto de pontos 3D usando SVD."""
+        """Fits a new mathematical plane to a set of 3D points using SVD."""
         P = np.asarray(points_xyz, dtype=float)
         if len(P) < 3:
             raise ValueError(
-                "São necessários pelo menos 3 pontos para ajustar um plano."
+                "At least 3 points are required to fit a plane."
             )
         centroid = P.mean(axis=0)
         Q = P - centroid
@@ -571,7 +571,7 @@ class ParallelGraspSampler(
         angle_thresh_deg: float,
         offset_thresh: float,
     ) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
-        """Funde múltiplos pequenos planos do RANSAC em superfícies contínuas maiores."""
+        """Merges multiple small RANSAC planes into larger continuous surfaces."""
         planes: List[Dict[str, Any]] = []
         for m, n_unit, idxs in zip(p_models, p_normals, p_indices):
             a, b, c, d = m
@@ -630,8 +630,8 @@ class ParallelGraspSampler(
         self, plane_normals: List[np.ndarray], angle_thresh_deg: float
     ) -> List[List[int]]:
         """
-        Agrupa os índices dos planos que são paralelos entre si.
-        A ordem importa: O plano de referência deve ser sempre o maior (índice 0 da lista).
+        Groups indices of planes that are parallel to each other.
+        Order matters: The reference plane should always be the largest (index 0 of the list).
         """
         unclustered = list(range(len(plane_normals)))
         parallel_groups: List[List[int]] = []
@@ -660,7 +660,7 @@ class ParallelGraspSampler(
     def _extract_overlap_region(
         self, proj_A: o3d.geometry.PointCloud, proj_B: o3d.geometry.PointCloud
     ) -> Optional[o3d.geometry.PointCloud]:
-        """Extrai a região 3D onde os dois planos projetados se sobrepõem."""
+        """Extracts the 3D region where two projected planes overlap."""
         if len(proj_A.points) == 0 or len(proj_B.points) == 0:
             return None
 
@@ -692,7 +692,7 @@ class ParallelGraspSampler(
         normal: np.ndarray,
         margin: float,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Filtra pontos que estão localizados fisicamente entre duas fatias planas."""
+        """Filters points located physically between two planar slices."""
         points = (
             np.asarray(pcd_pts.points)
             if isinstance(pcd_pts, o3d.geometry.PointCloud)
@@ -710,7 +710,7 @@ class ParallelGraspSampler(
     def _project_points_to_plane(
         self, points: np.ndarray, plane_point: np.ndarray, plane_normal: np.ndarray
     ) -> np.ndarray:
-        """Projeta um array de pontos 3D contra uma superfície plana matemática."""
+        """Projects a 3D point array against a mathematical planar surface."""
         if len(points) == 0:
             return np.empty((0, 3))
         v = points - plane_point
@@ -725,7 +725,7 @@ class ParallelGraspSampler(
         ctr: np.ndarray,
         is_p2: bool = False,
     ) -> Tuple[List[Polygon], List[np.ndarray], List[np.ndarray]]:
-        """Gera polígonos 2D (Shapely) a partir da nuvem de pontos projetada usando OpenCV."""
+        """Generates 2D polygons (Shapely) from projected point clouds using OpenCV."""
         if p_cloud.is_empty() or len(p_cloud.points) <= 50:
             return [Polygon()], [], []
 
@@ -802,7 +802,7 @@ class ParallelGraspSampler(
         spacing_edge: float,
         spacing_normal: float,
     ) -> Tuple[List[List[np.ndarray]], List[np.ndarray]]:
-        """Gera pontos candidatos a TCP baseados no contorno externo e na profundidade dos dedos."""
+        """Generates TCP candidate points based on the outer contour and finger depth."""
         rectangles, all_grid_points = [], []
         eps = 1e-9
         for (pt1, pt2), n in zip(segments_2d, normals_2d):
@@ -837,7 +837,7 @@ class ParallelGraspSampler(
     def _create_gripper_bounding_box(
         self, grid_points: List[np.ndarray], segments_2d: List[List[np.ndarray]]
     ) -> List[List[Dict[str, Any]]]:
-        """Cria as 6 caixas retangulares paramétricas que representam o braço do robô em 2D."""
+        """Creates the 6 parametric rectangular boxes representing the robot arm in 2D."""
         all_shapes = []
         g_cfg = self.gripper.config
 
@@ -851,7 +851,7 @@ class ParallelGraspSampler(
                 grid_edge_distance = np.dot(mid - pt, normal)
                 rects = []
 
-                # 1. P1: Espaço seguro frontal dos dedos
+                # 1. P1: Finger front safe space
                 c1 = pt - normal * (g_cfg.x_pg + g_cfg.rj)
                 hw = (g_cfg.e_pg + 2 * (g_cfg.i_pg + g_cfg.rj)) / 2
                 rects.append(
@@ -863,7 +863,7 @@ class ParallelGraspSampler(
                     ]
                 )
 
-                # 2. P2: Comprimento e zona de toque dos dedos
+                # 2. P2: Finger length and touch zone
                 c2 = pt
                 rects.append(
                     [
@@ -878,7 +878,7 @@ class ParallelGraspSampler(
                     ]
                 )
 
-                # 3. P3: Base inferior do Gripper
+                # 3. P3: Gripper lower base
                 c3 = c2 + normal * (g_cfg.b_pg + g_cfg.c_pg + g_cfg.rj)
                 hb = (
                     max(
@@ -898,7 +898,7 @@ class ParallelGraspSampler(
                     ]
                 )
 
-                # 4. P4: Base superior e braço principal do Robô
+                # 4. P4: Robot upper base and main arm
                 c4 = c3 + normal * hth
                 ha = (max(g_cfg.ra, g_cfg.rb) + g_cfg.re + 2 * g_cfg.rj) / 2
                 hta = g_cfg.rc + g_cfg.rf + 2 * g_cfg.rj
@@ -911,7 +911,7 @@ class ParallelGraspSampler(
                     ]
                 )
 
-                # 5. P5: Área livre interna do Gripper
+                # 5. P5: Gripper internal free area
                 c5 = pt
                 harea = (g_cfg.z_pg - 2 * g_cfg.rj) / 2
                 htarea = g_cfg.b_pg - 2 * g_cfg.rj
@@ -924,7 +924,7 @@ class ParallelGraspSampler(
                     ]
                 )
 
-                # 6. P6: Espaço retrocedente (Safety Back Space)
+                # 6. P6: Safety Back Space
                 c6 = c4 + normal * hta
                 htb = grid_edge_distance + g_cfg.x_pg + g_cfg.rj
                 rects.append(
@@ -941,7 +941,7 @@ class ParallelGraspSampler(
         return all_shapes
 
     def _clean_geom(self, geom: Any) -> Any:
-        """Repara e simplifica polígonos inválidos (ex: laços e auto-intersecções) para o Shapely."""
+        """Repairs and simplifies invalid polygons (e.g., self-intersections) for Shapely."""
         if geom.is_empty:
             return geom
         g = geom

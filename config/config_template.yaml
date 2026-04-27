@@ -1,0 +1,89 @@
+# ==============================================================================
+# VACUUM GRASP SAMPLER: CONFIGURATION TEMPLATE
+# ==============================================================================
+# This file controls the behavior of the discovery and evaluation engine.
+# All distances are in METERS, and all angles are in DEGREES.
+
+# ------------------------------------------------------------------------------
+# 1. SAMPLING & GEOMETRY (Candidate Generation)
+# ------------------------------------------------------------------------------
+raycasting_samples:
+  # Number of rays cast from a bounding sphere towards the object center.
+  # Good for discovering side-walls and complex cavities.
+  sphere: 200
+  
+  # Number of rays cast from a flat ceiling grid above the object.
+  # Essential for top-down grasping on flat surfaces.
+  top_down: 400
+
+# Hull algorithm used to create a 'solid' target for rays.
+# Options: 
+#  - "alpha": Best for boxes and concave shapes (preserves holes).
+#  - "poisson": Best for smooth, watertight watertight results (closes small gaps).
+#  - "convex": Fastest, but ignores all cavities/holes.
+raycasting_hull_type: "poisson"
+
+# If true, only rays from the upper hemisphere (Z+) are cast.
+# Useful to avoid sampling points that are physically impossible to reach (the bottom).
+raycasting_hemisphere_only: false
+
+
+# ------------------------------------------------------------------------------
+# 2. COLLISION & SAFETY (Validation)
+# ------------------------------------------------------------------------------
+# The length of the 'safety cylinder' extending from the gripper base.
+# Effectively the distance the robot needs for a clear approach path.
+approach_distance: 0.10
+
+# Clearance to ignore from the exact contact point (prevents self-collision).
+# Usually corresponds to the compression depth of the suction cup.
+local_clearence_margin: 0.005
+
+# Shape used to verify if the gripper body intersects the object.
+# Options:
+#  - "bounding_box_shape": Fast OBB check.
+#  - "extended_body_shape": Cylindrical sweep along the approach vector.
+#  - "gripper_shape": Precise check using the actual 3D mesh of the gripper.
+safety_volume_shape: "extended_body_shape"
+
+
+# ------------------------------------------------------------------------------
+# 3. ROTATION & STRATEGY (Orientation)
+# ------------------------------------------------------------------------------
+# Strategy for generating gripper orientations around the surface normal.
+# Options:
+#  - "fixed": Gripper Z-axis is aligned to normal; no rotation tested (best for round cups).
+#  - "uniform": Gripper is rotated around the normal (best for asymmetric cup arrays).
+rotation_strategy: "fixed"
+
+# If using 'uniform', define the search resolution:
+rotation_step_deg: 45
+rotation_range_deg: 90
+
+# Maximum allowed angle between the surface normal and the world Z-axis.
+# Filters out grasps on walls that are too steep for a top-down robot approach.
+max_angle_deg: 45.0
+
+
+# ------------------------------------------------------------------------------
+# 4. EVALUATION & SCORING (Ranking)
+# ------------------------------------------------------------------------------
+# Minimum total score [0.0 - 1.0] for a grasp to be considered 'Valid'.
+min_score: 0.3
+
+# Weights for the final score calculation (Must sum to 1.0).
+weight_seal: 0.40        # Importance of pad contact density (GSS).
+weight_verticality: 0.30 # Importance of alignment with gravity.
+weight_torque: 0.30      # Importance of proximity to the Center of Mass (CoM).
+
+# Minimum Sealing Score required for EVERY pad (or the aggregate).
+# A value of 0.5 means at least 50% of the pad zones must be filled with points.
+min_seal_threshold: 0.4
+
+# Method to combine scores from multiple suction cups:
+# Options: "min" (Conservative), "mean" (Average), "median" (Robust to noise).
+score_aggregation_method: "min"
+
+# If true, calculates all score components even if the grasp fails early.
+# Essential for generating heatmaps and debugging rejection reasons.
+debug_score: true

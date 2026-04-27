@@ -84,6 +84,7 @@ class VacuumSamplerConfig:
     # "min": Conservative. If one pad fails, everything fails.
     # "mean": Average. Good for dense arrays of suction cups.
     score_aggregation_method: Literal["min", "mean", "median"] = "min"
+    verticality_decay: float = 0.6
     debug_score: bool = (
         False  # Calculate all attributes even if it fails for final score
     )
@@ -718,7 +719,7 @@ class VacuumGraspSampler(
         dot = np.dot(normal, z_axis)
         angle_deg = np.degrees(np.arccos(np.clip(abs(dot), -1.0, 1.0)))
 
-        decay_factor = 0.6 if dot < 0 else 1.0
+        decay_factor = self.config.verticality_decay if dot < 0 else 1.0
 
         if angle_deg > self.config.max_angle_deg:
             # print("[Debug] Candidate failed verticality check: angle_deg =", angle_deg)

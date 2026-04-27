@@ -651,18 +651,18 @@ class GenericGeometry:
 
     def scale(self, scale_factor: float, center: bool = False):
         """
-        Escala a geometria proporcionalmente pelo fator fornecido.
+        Scales the geometry proportionally by the provided factor.
 
         Args:
-            scale_factor (float): O fator de multiplicação (ex: 0.001 para converter mm em m).
-            center (bool): Se True, escala em torno do centro de massa/centroide do objeto.
-                           Se False (padrão), escala em torno da origem (0,0,0) para manter o TCP fixo.
+            scale_factor (float): The multiplication factor (e.g., 0.001 to convert mm to m).
+            center (bool): If True, scales around the object's Center of Mass/centroid.
+                           If False (default), scales around the origin (0,0,0) to keep the TCP fixed.
         """
         import numpy as np
         import open3d as o3d
         import trimesh
 
-        # 1. Determinar o ponto central de escala (center_pt)
+        # 1. Determine the central scaling point (center_pt)
         if center:
             if isinstance(self.geometry, o3d.geometry.Geometry3D):
                 center_pt = self.geometry.get_center()
@@ -673,14 +673,14 @@ class GenericGeometry:
         else:
             center_pt = np.array([0.0, 0.0, 0.0])
 
-        # 2. Aplicar a escala de acordo com o motor geométrico
+        # 2. Apply scaling according to the geometric engine
         if isinstance(self.geometry, o3d.geometry.Geometry3D):
-            # O Open3D possui um método nativo que aceita o ponto central
+            # Open3D has a native method that accepts the center point
             self.geometry.scale(scale_factor, center=center_pt)
 
         elif isinstance(self.geometry, trimesh.Trimesh):
-            # Para o Trimesh, construímos a matriz de transformação 4x4
-            # Equação matemática: p' = S*(p - C) + C  =>  p' = S*p + (C - S*C)
+            # For Trimesh, we construct a 4x4 transformation matrix
+            # Mathematical equation: p' = S*(p - C) + C  =>  p' = S*p + (C - S*C)
             transform = np.eye(4)
             transform[:3, :3] *= scale_factor
             transform[:3, 3] = center_pt - (scale_factor * center_pt)
@@ -689,7 +689,7 @@ class GenericGeometry:
 
         else:
             raise TypeError(
-                f"Tipo de geometria não suportado para escala: {type(self.geometry)}"
+                f"Geometry type not supported for scaling: {type(self.geometry)}"
             )
 
-        return self  # Permite o encadeamento de métodos (ex: geom.scale(0.001).visualize())
+        return self  # Allows method chaining (e.g., geom.scale(0.001).visualize())

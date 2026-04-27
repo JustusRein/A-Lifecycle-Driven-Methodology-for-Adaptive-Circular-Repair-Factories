@@ -10,17 +10,17 @@ gripper:
 
   # --- PADS ---
   # 2 cirles suction cups side by side
-  pad_height: 0.05  # Altura das ventosas
+  pad_height: 0.015  # Altura das ventosas
   pads:
     - type: "circle"
       name: "left_cup"
       # 4cm to the left of center
       offset: [0.0, 0.0, 0.0] 
-      radius: 0.030 # 20mm raio
+      radius: 0.005 # 20mm raio
 
-      thickness: 0.004          # Absolute thickness of the ring
+      thickness: 0.001          # Absolute thickness of the ring
       relative_thickness: false # Thickness mode (absolute or relative)
-      max_sealing_distance: 0.005
+      max_sealing_distance: 0.0005
 
       zones:
         num_angular_sections: 8
@@ -31,8 +31,8 @@ gripper:
   # --- BODY CONFIG ---
   # The main gripper body that holds the suction cups
   body:
-    radius: 0.08   # Raio do corpo que segura as ventosas
-    length: 0.10   # Comprimento total do corpo
+    radius: 0.010   # Raio do corpo que segura as ventosas
+    length: 0.02   # Comprimento total do corpo
 
   # --- SAFETY PARAMETERS ---
   safety:

@@ -1,8 +1,8 @@
 # Sampling & Geometry
 raycasting_samples:
-  sphere: 400
+  sphere: 200
   top_down: 400
-raycasting_hull_type: "alpha"
+raycasting_hull_type: "poisson"
 raycasting_hemisphere_only: false
 
 # Colisões e Segurança
@@ -12,16 +12,18 @@ safety_volume_shape: "extended_body_shape" #"bounding_box_shape", "extended_body
 # collision_margin: 0.10
 
 # Rotação e Estratégia
-rotation_strategy: "uniform"
+rotation_strategy: "fixed"
+# rotation_strategy: "uniform"
 rotation_step_deg: 45
-rotation_range_deg: 180
+rotation_range_deg: 90
 max_angle_deg: 45.0
 
 # Avaliação (Scoring)
 min_score: 0.3
 weight_seal: 0.30
-weight_verticality: 0.40
+weight_verticality: 0.30
 weight_torque: 0.30
-min_seal_threshhold: 0.3
+min_seal_threshold: 0.2
 score_aggregation_method: "min"
 debug_score: true
+# verticality_decay: 1.0

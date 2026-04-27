@@ -5,18 +5,26 @@
 \usepackage{booktabs} 
 \usepackage{tabularx} 
 \usepackage{float} 
+\usepackage{graphicx} 
+\usepackage{array} 
 \usepackage{geometry}
-\geometry{margin=2.5cm}
+\geometry{margin=2.5cm} % Pode alterar para 2.0cm se preferir margens ligeiramente menores
 
 \begin{document}
 
 \section{Methodology}
 
-The proposed vacuum grasping algorithm evaluates point cloud data to determine the optimal Target Center Point (TCP) and approach vector for a multi-pad vacuum gripper. The method ensures physical feasibility and maximizes grasp stability. The pipeline consists of four main phases:
+The proposed vacuum grasping algorithm evaluates point cloud data to determine the optimal Target Center Point (TCP) and approach vector for a multi-pad vacuum gripper. The method ensures physical feasibility and maximizes grasp stability. The pipeline consists of four main phases, as illustrated in Figure \ref{fig:pipeline_flowchart}.
+\begin{figure}
+    % O \makebox centraliza o excesso nos dois lados perfeitamente
+    \makebox[\textwidth][c]{\includegraphics[width=1.04\textwidth, keepaspectratio]{images/Vacuum_Flow.pdf}}
+    \caption{Overview of the proposed vacuum grasping algorithm pipeline, detailing the four main phases from point cloud preprocessing to the final target selection.}
+    \label{fig:pipeline_flowchart}
+\end{figure}
 
 \begin{enumerate}
     \item \textbf{Point Cloud Preprocessing and Surface Discovery:}
-    The raw point cloud undergoes preprocessing, including voxel downsampling and dynamic radius-based outlier removal, which preserves geometric features such as sharp edges and flat surfaces. To identify viable contact points and resolve normal vector ambiguities, an inward raycasting strategy is applied. The algorithm uses a configurable pattern—combining orthogonal (top-down) rays to thoroughly explore planar upper surfaces and spherical rays to capture all possible approach directions. The dot product between the ray direction and the estimated surface normal ensures that all vectors point consistently outward from the object.
+    The raw point cloud undergoes preprocessing, including voxel downsampling and dynamic radius-based outlier removal, which preserves geometric features such as sharp edges and flat surfaces. To identify viable contact points and resolve normal vector ambiguities, an inward raycasting strategy is applied. The algorithm uses a configurable pattern, combining orthogonal (top-down) rays to thoroughly explore planar upper surfaces and spherical rays to capture all possible approach directions. The dot product between the ray direction and the estimated surface normal ensures that all vectors point consistently outward from the object.
 
     \item \textbf{Pose Generation and Clearance Verification:}
     Valid ray hits are snapped to the nearest physical surface points using a KD-Tree search. For each point, the gripper's Z-axis is aligned with the surface normal to establish a base approach pose. Before generating additional orientations, the algorithm performs a local clearance check within a defined safety volume. This volume is expanded by a \textit{collision margin} (e.g., 5\%) to absorb sensor noise and calibration inaccuracies. Furthermore, an \textit{approach distance} is established along the normal vector to guarantee a safe linear trajectory prior to physical contact. Base poses that pass this collision filter are rotated around their local Z-axis in discrete angular steps to generate a set of multi-axis orientation candidates. To optimize computational efficiency, the total rotation range adapts to the hardware's physical symmetry. For instance, the algorithm evaluates a $180^\circ$ range for bilateral two-pad grippers, $90^\circ$ for orthogonal four-pad configurations, and restricts rotation entirely ($0^\circ$) for a single, radially symmetric circular cup.
@@ -33,16 +41,14 @@ The proposed vacuum grasping algorithm evaluates point cloud data to determine t
     The surviving candidates are ranked by combining their normalized verticality, torque, and seal scores through a weighted sum. The candidate with the highest overall GSS is selected as the optimal grasp pose and forwarded to the robot's motion planner for execution.
 \end{enumerate}
 
-\par To ensure robustness across diverse object scales and sensor resolutions, the algorithm intentionally minimizes the use of hard-coded thresholds. Instead, it relies on dynamically computed parameters constrained by physical minimum and maximum bounds. For example, key geometric properties, such as the global point cloud density, are calculated at runtime based on the average nearest-neighbor point distance. This scale-invariant architecture allows the pipeline to process varying geometries—from small components like CubeSats to large logistics packages—without requiring manual parameter tuning for each new object.
+\par To ensure robustness across diverse object scales and sensor resolutions, the algorithm intentionally minimizes the use of hard-coded thresholds. Instead, it relies on dynamically computed parameters constrained by physical minimum and maximum bounds. For example, key geometric properties, such as the global point cloud density, are calculated at runtime based on the average nearest-neighbor point distance. This scale-invariant architecture allows the pipeline to process varying geometries, from small components like CubeSats to large logistics packages, without requiring manual parameter tuning for each new object.
 
-% Aumenta o espaçamento vertical entre as linhas da tabela (1.4x o tamanho original)
 \renewcommand{\arraystretch}{1.4}
 
-\begin{table}[H]
+\begin{table}
     \centering
-    % Reduz levemente a fonte para garantir que a tabela caiba na primeira página
     \small 
-    \begin{tabularx}{\textwidth}{@{}llcX@{}}
+    \begin{tabularx}{\textwidth}{@{}llc >{\raggedright\arraybackslash}X@{}}
         \toprule
         \textbf{Category} & \textbf{Parameter} & \textbf{Symbol / Value} & \textbf{Description / Calculation} \\
         \midrule
@@ -58,7 +64,7 @@ The proposed vacuum grasping algorithm evaluates point cloud data to determine t
         Generation & Collision Margin & $0.05$ (5\%) & Volume expansion factor to absorb sensor/calibration noise. \\
         Generation & Rotation Range & $\theta_{range} = 180^\circ$ & Search space bounds adapted to gripper hardware symmetry. \\
         Generation & Rotation Angle Step & $\theta_{step} = 45^\circ$ & Angular resolution for generating Z-axis orientations. \\
-        Evaluation & Angular Seal Slices & $N_{slices} = 8$ & Number of $45^\circ$ radial sectors evaluated per suction cup. \\
+        Evaluation & Angular Seal Slices & $N_{slices} = 8$ & Number of radial sectors evaluated per suction cup. \\
         Evaluation & Max Sealing Distance & $5$ mm & Vertical tolerance modeling the physical suction cup bellow. \\
         Evaluation & Maximum Tilt Angle & $\theta_{max} = 45^\circ$ & Maximum allowed deviation from the gravity vector. \\
         Evaluation & Upside-down Decay & $0.60$ & Penalty factor applied to grasp poses pointing upwards. \\
@@ -75,4 +81,5 @@ The proposed vacuum grasping algorithm evaluates point cloud data to determine t
     \label{tab:grasp_parameters}
 \end{table}
 
+\include{implementation}
 \end{document}

@@ -1,0 +1,80 @@
+# ==============================================================================
+#  VACUUM GRIPPER CONFIGURATION TEMPLATE
+# ==============================================================================
+# This template defines the physical and geometric properties of a gripper.
+# Use this to build suction arrays (single cup, double, quad, etc.)
+# All distances are in METERS.
+
+gripper:
+  name: "TEMPLATE_GRIPPER_NAME"
+  
+  # --- Visualization & Collision ---
+  # Paths to .stl or .obj files for visualization and precise collision checks.
+  # Set to null to use primitive shapes (cylinders/boxes).
+  visual_mesh_path: null
+  collision_mesh_path: null
+
+  # --- TCP Parameters ---
+  # The Z-distance from the gripper mounting plate to the relaxed contact 
+  # surface of the pads. This defines the Tool Center Point (TCP).
+  pad_height: 0.015
+
+  # --- PADS CONFIGURATION ---
+  # List all suction pads in the array. You can mix different types.
+  pads:
+    # ---------------------------------------------------------
+    # OPTION A: Standard Circular Suction Cup
+    # ---------------------------------------------------------
+    - type: "circle"            # REQUIRED: "circle" or "rect"
+      name: "left_cup"
+      offset: [-0.02, 0.0, 0.0] # [x, y, z] relative to gripper center
+      radius: 0.015             # 15mm radius (30mm diameter)
+      length: 0.005             # Pad thickness for visualization
+      max_sealing_distance: 0.001 # Max surface gap allowed for a seal
+      
+      # Sealing Lip Geometry:
+      thickness: 0.002          # Lip width (absolute meters)
+      relative_thickness: false # If true, thickness is a % of radius (0.0 to 1.0)
+      
+      # GSS Resolution (Pizza-Slice logic):
+      zones:
+        num_angular_sections: 8 # Number of angular 'slices' to validate
+        num_radial_sections: 1  # Number of concentric rings to validate
+
+    # ---------------------------------------------------------
+    # OPTION B: Rectangular Foam / Suction Pad
+    # ---------------------------------------------------------
+    - type: "rect"
+      name: "central_foam_pad"
+      offset: [0.0, 0.0, 0.0]
+      width: 0.03               # X-dimension (30mm)
+      height: 0.05              # Y-dimension (50mm)
+      length: 0.01              # Z-dimension (foam depth)
+      max_sealing_distance: 0.002
+      
+      # Sealing Lip Geometry (Independent X/Y):
+      w_thickness: 0.005        # Lip width along X-axis
+      h_thickness: 0.005        # Lip width along Y-axis
+      relative_thickness: false
+      
+      # GSS Resolution (Edge-Strip logic):
+      zones:
+        num_width_sections: 4   # Divisions along the top/bottom edges
+        num_height_sections: 2  # Divisions along the left/right edges
+
+  # --- BODY CONFIG ---
+  # Primitive shape defining the structural body of the gripper.
+  # Used for collision checks if visual_mesh_path is null.
+  body:
+    radius: 0.025               # Body radius (meters)
+    length: 0.040               # Body height (meters)
+
+  # --- SAFETY & STRATEGY ---
+  safety:
+    # Percentage of extra volume to add to collision shapes (0.05 = 5%).
+    collision_margin: 0.05 
+    
+  # Logic used when checking multi-pad contact:
+  # - "single": Only the cup that hits the surface is evaluated.
+  # - "projection": All pads are projected simultaneously (best for arrays).
+  grasp_strategy: "projection"

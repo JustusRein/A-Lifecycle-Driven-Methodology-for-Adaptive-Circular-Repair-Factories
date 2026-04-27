@@ -30,7 +30,7 @@ def create_pose_matrix(
 
 
 def generate_z_rotation_fan(
-    base_rotation: np.ndarray, step_deg: int, range_deg: int
+    base_rotation: np.ndarray, step_deg: float, range_deg: float
 ) -> List[np.ndarray]:
     """
     Generates a list of rotation matrices by rotating the 'base_rotation'
@@ -49,8 +49,8 @@ def generate_z_rotation_fan(
     # Avoid infinite loop or zero division
     if step_deg <= 0:
         step_deg = 360
-
-    for angle_deg in range(0, range_deg + 1, step_deg):
+    angle_deg = 0
+    while angle_deg <= range_deg:
         # Create local rotation around Z
         angle_rad = np.radians(angle_deg)
         c, s = np.cos(angle_rad), np.sin(angle_rad)
@@ -62,6 +62,7 @@ def generate_z_rotation_fan(
         # R_final = R_base @ R_local
         R_final = base_rotation @ R_local_z
         rotations.append(R_final)
+        angle_deg += step_deg
 
     return rotations
 
@@ -1488,3 +1489,123 @@ def extract_contour_segments(
         normals.append(n)
 
     return segments, normals
+
+
+def align_largest_plane_to_z(
+    pcd, distance_threshold=0.005, n_iterations=5000, k=1, theta_min_diff=20.0
+):
+    """
+    Finds the K "best" distinct planes for alignment.
+    "Best" is defined as the plane containing the largest CONTIGUOUS cluster (DBSCAN).
+    "Distinct" means the angle between the normals of any two returned planes
+    must be at least 'theta_min_diff' degrees.
+    """
+    working_pcd = copy.deepcopy(pcd)
+    com = pcd.get_center()
+
+    # 1. Determine DBSCAN parameters based on density
+    density_report = get_point_cloud_density(pcd)
+    avg_spacing = density_report["average_distance"]
+    dbscan_eps = max(distance_threshold, avg_spacing * 2.5)
+
+    candidate_planes = []
+    accepted_normals = []
+
+    # 2. Iteratively extract candidate planes
+    # We search more aggressively to find distinct faces
+    max_search_iterations = max(k * 5, 15)
+
+    for _ in range(max_search_iterations):
+        if len(working_pcd.points) < 50:
+            break
+
+        plane_model, inliers = working_pcd.segment_plane(
+            distance_threshold=distance_threshold,
+            ransac_n=3,
+            num_iterations=n_iterations,
+        )
+
+        plane_pcd = working_pcd.select_by_index(inliers)
+        [a, b, c, d] = plane_model
+        plane_normal = np.array([a, b, c])
+        plane_normal /= np.linalg.norm(plane_normal)
+
+        # Orient normal outward (away from CoM)
+        if np.dot(plane_normal, com - plane_pcd.get_center()) > 0:
+            plane_normal = -plane_normal
+
+        # 3. Diversity Check: Is this normal distinct from already accepted ones?
+        is_distinct = True
+        for accepted_n in accepted_normals:
+            dot = np.clip(np.dot(plane_normal, accepted_n), -1.0, 1.0)
+            angle = np.degrees(np.arccos(dot))
+            if angle < theta_min_diff:
+                is_distinct = False
+                break
+
+        if not is_distinct:
+            # Still remove inliers to find other potential orientations
+            working_pcd = working_pcd.select_by_index(inliers, invert=True)
+            continue
+
+        # 4. Apply DBSCAN to find the largest contiguous cluster in this plane
+        labels = np.array(
+            plane_pcd.cluster_dbscan(
+                eps=dbscan_eps, min_points=10, print_progress=False
+            )
+        )
+
+        if len(labels) > 0 and labels.max() >= 0:
+            counts = np.bincount(labels[labels >= 0])
+            max_cluster_size = counts.max()
+        else:
+            max_cluster_size = 0
+
+        if max_cluster_size > 0:
+            candidate_planes.append(
+                {
+                    "model": plane_model,
+                    "size": max_cluster_size,
+                    "normal": plane_normal,
+                    "centroid": plane_pcd.get_center(),
+                }
+            )
+            accepted_normals.append(plane_normal)
+
+        # Remove inliers to find the next geometric plane
+        working_pcd = working_pcd.select_by_index(inliers, invert=True)
+
+        if len(candidate_planes) >= k:
+            break
+
+    # 5. Rank candidates by contiguous size and prepare results
+    candidate_planes.sort(key=lambda x: x["size"], reverse=True)
+
+    aligned_geometries = []
+    for plane in candidate_planes:
+        plane_normal = plane["normal"]
+
+        # Rodrigues Rotation to align plane normal with Z-axis [0,0,1]
+        z_axis = np.array([0.0, 0.0, 1.0])
+        v = np.cross(plane_normal, z_axis)
+        c_angle = np.dot(plane_normal, z_axis)
+        s_angle = np.linalg.norm(v)
+
+        if s_angle < 1e-6:
+            R = (
+                np.eye(3)
+                if c_angle > 0
+                else np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float)
+            )
+        else:
+            kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+            R = np.eye(3) + kmat + kmat @ kmat * ((1 - c_angle) / s_angle**2)
+
+        rotated_pcd = copy.deepcopy(pcd)
+        rotated_pcd.rotate(R, center=com)
+        aligned_geometries.append(rotated_pcd)
+
+    if not aligned_geometries:
+        return [copy.deepcopy(pcd)]
+
+    return aligned_geometries

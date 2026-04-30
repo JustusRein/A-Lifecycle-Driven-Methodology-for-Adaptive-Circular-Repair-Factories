@@ -1,0 +1,71 @@
+name: robgrasp_venv
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python
+  - python=3.13
+  - pip
+
+  # Core scientific stack
+  - numpy
+  - scipy
+  - matplotlib
+  - pandas
+  - scikit-learn
+
+  # Geometry / robotics / vision
+  - open3d
+  - opencv
+  - trimesh
+  - shapely
+  - embree
+  - assimp
+  - vtk
+  - pyqt
+  - pillow
+  - imageio
+  - networkx
+  - joblib
+  - multipledispatch
+
+  # Notebook / dev
+  - jupyterlab
+  - ipykernel
+  - notebook
+  - black
+  - pylint
+  - isort
+  - ruff
+
+  # Utilities
+  - requests
+  - pyyaml
+  - tqdm
+
+  - pip:
+      # Rendering / geometry extras
+      - pyrender==0.1.45
+      - pyglet==2.1.11
+      - pyopengl==3.1.0
+      - freetype-py==2.5.1
+      - manifold3d==3.3.2
+      - rtree==1.4.1
+
+      # Collision / robotics
+      - python-fcl==0.7.0.10
+
+      # Git / Jupyter extras
+      - gitpython==3.1.45
+      - gitdb==4.0.12
+      - smmap==5.0.2
+      - jupyterlab-git==0.51.3
+      - jupyterlab-vim==4.1.4
+      - nbdime==4.0.2
+      - jupyter-server-mathjax==0.2.6
+
+      # Optional plotting / analysis
+      - seaborn==0.13.2
+      - pyarrow==23.0.0

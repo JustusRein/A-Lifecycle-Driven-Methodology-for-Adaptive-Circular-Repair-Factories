@@ -1,6 +1,6 @@
 # Sampling & Geometry
 raycasting_samples:
-  sphere: 0
+  sphere: 200
   top_down: 400
 raycasting_hull_type: "poisson"
 raycasting_hemisphere_only: false
@@ -8,8 +8,7 @@ raycasting_hemisphere_only: false
 # Colisões e Segurança
 approach_distance: 0.10
 local_clearence_margin: 0.001
-safety_volume_shape: "gripper_shape" #"bounding_box_shape", "extended_body_shape", "gripper_shape"
-# safety_volume_shape: "extended_body_shape" #"bounding_box_shape", "extended_body_shape", "gripper_shape"
+safety_volume_shape: "extended_body_shape" #"bounding_box_shape", "extended_body_shape", "gripper_shape"
 # collision_margin: 0.10
 
 # Rotação e Estratégia
@@ -30,4 +29,4 @@ weight_torque: 0.30
 min_seal_threshold: 0.0 # for conservative approach
 score_aggregation_method: "min"
 debug_score: true
-verticality_decay: 0.5
+verticality_decay: 0.0

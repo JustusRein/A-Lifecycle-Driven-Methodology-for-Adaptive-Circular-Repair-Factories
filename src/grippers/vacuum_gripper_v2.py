@@ -149,43 +149,66 @@ class VacuumGripper(BaseGripper):
     # 2. Geometry Generation (Visual / Collision Body)
     # =========================================================================
     def generate_collision_mesh(self) -> GenericGeometry:
-        """
-        Generates the static geometry of the gripper and applies the Pad Height offset.
-
-        CRITICAL:
-        The geometry is shifted along the Z-axis by 'pad_height'.
-        This ensures that the TCP (0,0,0) corresponds to the TIP of the suction cups,
-        not the mounting flange or the base of the body.
-        """
         geometry_wrapper = None
 
         # 1. Try loading an external mesh file first
         if self.config.visual_mesh_path:
-            # gu.load_mesh_file returns a Trimesh or Open3D object, or None
             mesh = gu.load_mesh_file(self.config.visual_mesh_path)
             if mesh is not None:
                 geometry_wrapper = GenericGeometry(geometry=mesh)
 
-        # 2. Fallback to procedural generation (Primitive shapes) if no file is found
+                # O offset só é necessário para malhas CAD externas
+                offset_vector = np.array([0.0, 0.0, self.config.pad_height])
+                try:
+                    geometry_wrapper.transform(translation=offset_vector)
+                except Exception as e:
+                    print(f"[Warning] Could not apply offset to collision mesh: {e}")
+
+        # 2. Fallback to procedural generation
         if geometry_wrapper is None:
+            # A montagem procedural já nasce perfeitamente posicionada no (0,0,0)
             geometry_wrapper = self._build_procedural_geometry()
-
-        # 3. Apply Z-Axis Offset (Pad Height Adjustment)
-        # We need to move the entire gripper body UP (positive Z) so that the
-        # origin (0,0,0) aligns with the suction cup tips.
-        # We use the 'transform' method from GenericGeometry which handles
-        # the underlying library (Open3D/Trimesh) abstraction automatically.
-
-        offset_vector = np.array([0.0, 0.0, self.config.pad_height])
-
-        try:
-            # Passes the translation vector. The wrapper creates the matrix internally.
-            geometry_wrapper.transform(translation=offset_vector)
-        except Exception as e:
-            print(f"[Warning] Could not apply offset to collision mesh: {e}")
 
         return geometry_wrapper
 
+    # def generate_collision_mesh(self) -> GenericGeometry:
+    #     """
+    #     Generates the static geometry of the gripper and applies the Pad Height offset.
+    #
+    #     CRITICAL:
+    #     The geometry is shifted along the Z-axis by 'pad_height'.
+    #     This ensures that the TCP (0,0,0) corresponds to the TIP of the suction cups,
+    #     not the mounting flange or the base of the body.
+    #     """
+    #     geometry_wrapper = None
+    #
+    #     # 1. Try loading an external mesh file first
+    #     if self.config.visual_mesh_path:
+    #         # gu.load_mesh_file returns a Trimesh or Open3D object, or None
+    #         mesh = gu.load_mesh_file(self.config.visual_mesh_path)
+    #         if mesh is not None:
+    #             geometry_wrapper = GenericGeometry(geometry=mesh)
+    #
+    #     # 2. Fallback to procedural generation (Primitive shapes) if no file is found
+    #     if geometry_wrapper is None:
+    #         geometry_wrapper = self._build_procedural_geometry()
+    #
+    #     # 3. Apply Z-Axis Offset (Pad Height Adjustment)
+    #     # We need to move the entire gripper body UP (positive Z) so that the
+    #     # origin (0,0,0) aligns with the suction cup tips.
+    #     # We use the 'transform' method from GenericGeometry which handles
+    #     # the underlying library (Open3D/Trimesh) abstraction automatically.
+    #
+    #     offset_vector = np.array([0.0, 0.0, self.config.pad_height])
+    #
+    #     try:
+    #         # Passes the translation vector. The wrapper creates the matrix internally.
+    #         geometry_wrapper.transform(translation=offset_vector)
+    #     except Exception as e:
+    #         print(f"[Warning] Could not apply offset to collision mesh: {e}")
+    #
+    #     return geometry_wrapper
+    #
     # def generate_collision_mesh(self) -> GenericGeometry:
     #     """
     #     Generates the static geometry of the gripper (at origin).
@@ -202,8 +225,15 @@ class VacuumGripper(BaseGripper):
 
     def _build_procedural_geometry(self) -> GenericGeometry:
         meshes = []
+        
+        # 1. Add pads (Base tips start at Z=0)
         meshes.extend(self._generate_pad_meshes())
-        meshes.append(self._generate_body_mesh())
+        
+        # 2. Add body (Starting at 0, move to the top of the pads)
+        body_mesh = self._generate_body_mesh()
+        # Ensure the body sits flush on top of the pads
+        body_mesh.translate(np.array([0, 0, self.config.pad_height]))
+        meshes.append(body_mesh)
 
         # Merge all parts into one geometry
         full_mesh = gu.merge_meshes(meshes)
@@ -266,28 +296,76 @@ class VacuumGripper(BaseGripper):
 
         # --- B. Generate STATIC Safety Mesh for Pads ---
         for pad in self.config.pads:
-            # 1. Get the mesh from the pad itself (Polymorphism: Rect or Circle)
-            # This mesh comes defined in local coordinates relative to the TCP (including offset)
             pad_mesh = pad.get_safety_mesh(margin_scale=safety_margin)
 
-            # 2. Transform it to the World Pose (Contact Point + Orientation)
+            # Aplica a transformação para o referencial do mundo
             pad_mesh.apply_transform(T_align)
-            pad_mesh.visual.face_colors = [int(c * 255) for c in CUP_COLOR] + [
-                200
-            ]  # RGBA with transparency
+            pad_mesh.visual.face_colors = [int(c * 255) for c in CUP_COLOR] + [200]
 
             parts.append(pad_mesh)
 
         # --- C. Generate SWEPT Safety Volume for Body ---
-        # The body needs to clear the path BEHIND the pads.
+        # CORREÇÃO: O corpo deve começar APÓS as ventosas, e não no contact_point
+        body_start_tcp = contact_point + (surface_normal * self.config.pad_height)
+
         parts.append(
             self._create_body_volume(
-                contact_point, surface_normal, approach_distance, safety_margin
+                body_start_tcp, surface_normal, approach_distance, safety_margin
             )
         )
 
         return gu.merge_meshes(parts)
 
+    #
+    # def generate_safety_collision_mesh(
+    #     self,
+    #     contact_point: np.ndarray,
+    #     surface_normal: np.ndarray,
+    #     approach_distance: float,
+    # ) -> trimesh.Trimesh:
+    #     """
+    #     Generates the collision volume for path checking.
+    #
+    #     Refined Logic:
+    #     1. Pads: STATIC geometry (inflated). Not extruded, to allow close contact.
+    #     2. Body: SWEPT volume (tube). Extruded backwards to check approach path.
+    #     """
+    #     safety_margin = 1.0 + self.config.collision_margin
+    #     parts = []
+    #
+    #     # --- A. Setup Transformation Matrix (Align Z with Normal) ---
+    #     # The safety mesh is generated at the TCP (contact_point) oriented along the normal.
+    #     R_align = gu.get_rotation_matrix_between_vectors(
+    #         np.array([0, 0, 1]), surface_normal
+    #     )
+    #     T_align = np.eye(4)
+    #     T_align[:3, :3] = R_align
+    #     T_align[:3, 3] = contact_point
+    #
+    #     # --- B. Generate STATIC Safety Mesh for Pads ---
+    #     for pad in self.config.pads:
+    #         # 1. Get the mesh from the pad itself (Polymorphism: Rect or Circle)
+    #         # This mesh comes defined in local coordinates relative to the TCP (including offset)
+    #         pad_mesh = pad.get_safety_mesh(margin_scale=safety_margin)
+    #
+    #         # 2. Transform it to the World Pose (Contact Point + Orientation)
+    #         pad_mesh.apply_transform(T_align)
+    #         pad_mesh.visual.face_colors = [int(c * 255) for c in CUP_COLOR] + [
+    #             200
+    #         ]  # RGBA with transparency
+    #
+    #         parts.append(pad_mesh)
+    #
+    #     # --- C. Generate SWEPT Safety Volume for Body ---
+    #     # The body needs to clear the path BEHIND the pads.
+    #     parts.append(
+    #         self._create_body_volume(
+    #             contact_point, surface_normal, approach_distance, safety_margin
+    #         )
+    #     )
+    #
+    #     return gu.merge_meshes(parts)
+    #
     def _create_body_volume(
         self, tcp: np.ndarray, normal: np.ndarray, dist: float, margin: float
     ) -> trimesh.Trimesh:

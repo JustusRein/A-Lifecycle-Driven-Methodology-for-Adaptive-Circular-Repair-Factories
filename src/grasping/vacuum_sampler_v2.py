@@ -494,9 +494,15 @@ class VacuumGraspSampler(
 
         s_torque = self._calculate_torque(cand, com_xy, max_torque_arm)
 
-        contact_points, adjusted_pose = self.strategy.resolve_contacts(
+        resolution = self.strategy.resolve_contacts(
             cand.transform, self.gripper.config.pads, pcd_tree, all_points
         )
+
+        if not resolution:
+            self._mark_candidate_failed(cand, "contact_resolution_failed")
+            return
+
+        contact_points, adjusted_pose = resolution
 
         cand.transform = adjusted_pose
         cand.contact_point = adjusted_pose[:3, 3]
@@ -713,7 +719,7 @@ class VacuumGraspSampler(
         max_torque = np.max(dists) if len(dists) > 0 else 1.0
         return com_xy, max_torque
 
-    def _calculate_verticality(self, cand):
+    def _calculate_verticality(self, cand, conservative: bool = True):
         z_axis = np.array([0, 0, 1])
         normal = -cand.approach_vector
         dot = np.dot(normal, z_axis)
@@ -721,7 +727,7 @@ class VacuumGraspSampler(
 
         decay_factor = self.config.verticality_decay if dot < 0 else 1.0
 
-        if angle_deg > self.config.max_angle_deg:
+        if (angle_deg > self.config.max_angle_deg) and not conservative:
             # print("[Debug] Candidate failed verticality check: angle_deg =", angle_deg)
             return 0.0, angle_deg
 
@@ -760,6 +766,7 @@ class VacuumGraspSampler(
         pcd: o3d.geometry.PointCloud,
         grasp: GraspCandidate,
         show_safety_volume: bool = False,
+        show_frame: bool = True,
     ):
         geometries = []
 
@@ -791,9 +798,10 @@ class VacuumGraspSampler(
 
         geometries.append(mesh_o3d)
 
-        frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
-        frame.transform(grasp.transform)
-        geometries.append(frame)
+        if show_frame:
+            frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+            frame.transform(grasp.transform)
+            geometries.append(frame)
 
         o3d.visualization.draw_geometries(
             geometries, window_name=f"Grasp Visualization - Score: {grasp.score:.3f}"

@@ -8,8 +8,7 @@ raycasting_hemisphere_only: false
 # Colisões e Segurança
 approach_distance: 0.10
 local_clearence_margin: 0.001
-safety_volume_shape: "gripper_shape" #"bounding_box_shape", "extended_body_shape", "gripper_shape"
-# safety_volume_shape: "extended_body_shape" #"bounding_box_shape", "extended_body_shape", "gripper_shape"
+safety_volume_shape: "extended_body_shape" #"bounding_box_shape", "extended_body_shape", "gripper_shape"
 # collision_margin: 0.10
 
 # Rotação e Estratégia

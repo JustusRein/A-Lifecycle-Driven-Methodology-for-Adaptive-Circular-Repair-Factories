@@ -164,23 +164,24 @@ def get_rotation_matrix_between_vectors(
 ) -> np.ndarray:
     """
     Calculates the 3x3 rotation matrix that aligns unit vector v_from to v_to.
-    Essential for aligning the Gripper Z-axis to the Surface Normal.
-
-    Args:
-        v_from: Source vector (e.g., [0, 0, 1]).
-        v_to: Target vector (e.g., surface_normal).
     """
-    v_from = v_from / np.linalg.norm(v_from)
-    v_to = v_to / np.linalg.norm(v_to)
+    # 1. Norm check to prevent division by zero (NaN propagation)
+    norm_from = np.linalg.norm(v_from)
+    norm_to = np.linalg.norm(v_to)
 
-    # Cross product gives the axis of rotation
+    if norm_from < 1e-8 or norm_to < 1e-8:
+        # If normal is invalid, we cannot compute a rotation. Return Identity.
+        return np.eye(3)
+
+    v_from = v_from / norm_from
+    v_to = v_to / norm_to
+
+    # 2. Cross product gives the axis of rotation
     v_cross = np.cross(v_from, v_to)
     dot = np.dot(v_from, v_to)
 
     # Handle edge cases (Already parallel or anti-parallel)
     if np.linalg.norm(v_cross) < 1e-6:
-        # If aligned (dot > 0), return Identity.
-        # If opposite (dot < 0), return 180 deg rotation (flip).
         return np.eye(3) if dot > 0 else -np.eye(3)
 
     # Rodrigues Rotation Formula (Skew-symmetric matrix approach)

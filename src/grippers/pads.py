@@ -136,14 +136,17 @@ class CircularPad(BaseSuctionPad):
         return dists <= self.radius
 
     def get_collision_mesh(self) -> trimesh.Trimesh:
-        # Use pre-calculated absolute thickness
-        inner_radius = max(self.radius - self.abs_thickness, 0.0)
-
+        # Base solid cylinder
         mesh = trimesh.creation.cylinder(radius=self.radius, height=self.length)
-        inner_mesh = trimesh.creation.cylinder(radius=inner_radius, height=self.length)
 
-        mesh = mesh.difference(inner_mesh)
-        mesh.apply_translation([0, 0, -self.length / 2.0])
+        # Only hollow it out for visuals if there is a hole
+        inner_radius = self.radius - self.abs_thickness
+        if inner_radius > 0:
+            inner_mesh = trimesh.creation.cylinder(radius=inner_radius, height=self.length)
+            mesh = mesh.difference(inner_mesh)
+
+        # Shift so Z=0 is the TIP of the pad
+        mesh.apply_translation([0, 0, self.length / 2.0])
         mesh.apply_translation(self.offset)
         return mesh
 
@@ -152,19 +155,15 @@ class CircularPad(BaseSuctionPad):
         return self.radius
 
     def get_safety_mesh(self, margin_scale: float) -> trimesh.Trimesh:
-        # Scale the geometry logic
+        """
+        Returns a SOLID inflated cylinder for collision detection.
+        We do NOT hollow this out to ensure points cannot 'leak' into the hole.
+        """
         safe_radius = self.radius * margin_scale
-        safe_thickness = self.abs_thickness * margin_scale
-
-        inner_safe_radius = max(safe_radius - safe_thickness, 0.0)
-
         mesh = trimesh.creation.cylinder(radius=safe_radius, height=self.length)
-        inner_mesh = trimesh.creation.cylinder(
-            radius=inner_safe_radius, height=self.length
-        )
 
-        mesh = mesh.difference(inner_mesh)
-        mesh.apply_translation([0, 0, -self.length / 2.0])
+        # Shift so Z=0 is the TIP
+        mesh.apply_translation([0, 0, self.length / 2.0])
         mesh.apply_translation(self.offset)
         return mesh
 
@@ -327,17 +326,19 @@ class RectangularPad(BaseSuctionPad):
         return (x <= self.width / 2.0) & (y <= self.height / 2.0)
 
     def get_collision_mesh(self) -> trimesh.Trimesh:
-        # Use absolute values directly
-        inner_w = max(self.width - (self.abs_w_thickness * 2), 0.0)
-        inner_h = max(self.height - (self.abs_h_thickness * 2), 0.0)
+        # Outer solid box
+        mesh = trimesh.creation.box(extents=[self.width, self.height, self.length])
 
-        outer_mesh = trimesh.creation.box(
-            extents=[self.width, self.height, self.length]
-        )
-        inner_mesh = trimesh.creation.box(extents=[inner_w, inner_h, self.length])
+        # Hollow it out only if dimensions allow
+        inner_w = self.width - (self.abs_w_thickness * 2)
+        inner_h = self.height - (self.abs_h_thickness * 2)
 
-        mesh = outer_mesh.difference(inner_mesh)
-        mesh.apply_translation([0, 0, -self.length / 2.0])
+        if inner_w > 0 and inner_h > 0:
+            inner_mesh = trimesh.creation.box(extents=[inner_w, inner_h, self.length])
+            mesh = mesh.difference(inner_mesh)
+
+        # Shift so Z=0 is the TIP
+        mesh.apply_translation([0, 0, self.length / 2.0])
         mesh.apply_translation(self.offset)
         return mesh
 
@@ -346,23 +347,15 @@ class RectangularPad(BaseSuctionPad):
         return np.sqrt((self.width / 2) ** 2 + (self.height / 2) ** 2)
 
     def get_safety_mesh(self, margin_scale: float) -> trimesh.Trimesh:
+        """
+        Returns a SOLID inflated box for collision detection.
+        """
         safe_w = self.width * margin_scale
         safe_h = self.height * margin_scale
+        mesh = trimesh.creation.box(extents=[safe_w, safe_h, self.length])
 
-        # Scale the absolute thickness by the margin to maintain proportions
-        scaled_w_thick = self.abs_w_thickness * margin_scale
-        scaled_h_thick = self.abs_h_thickness * margin_scale
-
-        inner_safe_w = max(safe_w - (scaled_w_thick * 2), 0.0)
-        inner_safe_h = max(safe_h - (scaled_h_thick * 2), 0.0)
-
-        outer_mesh = trimesh.creation.box(extents=[safe_w, safe_h, self.length])
-        inner_mesh = trimesh.creation.box(
-            extents=[inner_safe_w, inner_safe_h, self.length]
-        )
-        mesh = outer_mesh.difference(inner_mesh)
-
-        mesh.apply_translation([0, 0, -self.length / 2.0])
+        # Shift so Z=0 is the TIP
+        mesh.apply_translation([0, 0, self.length / 2.0])
         mesh.apply_translation(self.offset)
         return mesh
 

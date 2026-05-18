@@ -58,17 +58,18 @@ class SinglePadStrategy(GraspContactStrategy):
         all_points: np.ndarray,
         max_pad_gap: float = 0.005,
     ) -> Tuple[List[np.ndarray], np.ndarray]:
-        # The contact is the TCP origin itself
-        tcp_origin = tcp_pose[:3, 3]
+        try:
+            # The contact is the TCP origin itself
+            tcp_origin = tcp_pose[:3, 3]
 
-        # Returns: [Contact Points], Original Pose
-        return [tcp_origin], tcp_pose
+            # Returns: [Contact Points], Original Pose
+            return [tcp_origin], tcp_pose
+        except Exception:
+            return []
 
 
 class MultiPadProjectionStrategy(GraspContactStrategy):
     """
-    Projection Strategy (Justus' Idea 2).
-
     Logic:
     1. Keeps the gripper rigid at the candidate pose.
     2. Calculates the theoretical world position of each pad.
@@ -83,22 +84,35 @@ class MultiPadProjectionStrategy(GraspContactStrategy):
         all_points: np.ndarray,
         max_pad_gap: float = 0.005,
     ) -> Tuple[List[np.ndarray], np.ndarray]:
-        contact_points = []
-        R_tcp = tcp_pose[:3, :3]
-        t_tcp = tcp_pose[:3, 3]
+        try:
+            contact_points = []
+            R_tcp = tcp_pose[:3, :3]
+            t_tcp = tcp_pose[:3, 3]
 
-        for pad in pads:
-            # 1. Rigid World Position
-            pad_world_pos = t_tcp + (R_tcp @ pad.offset)
+            for pad in pads:
+                # 1. Rigid World Position
+                pad_world_pos = t_tcp + (R_tcp @ pad.offset)
 
-            # 2. Projection onto Surface (Nearest Neighbor)
-            [k, idx, _] = pcd_tree.search_knn_vector_3d(pad_world_pos, 1)
-            nearest_surface_point = all_points[idx[0]]
+                # Safety: Check for NaN/Inf (prevents KD-Tree crash)
+                if not np.all(np.isfinite(pad_world_pos)):
+                    print(f"[Warning] Invalid Pad Position calculated: {pad_world_pos}. Using TCP as fallback.")
+                    contact_points.append(t_tcp)
+                    continue
 
-            contact_points.append(nearest_surface_point)
+                # 2. Projection onto Surface (Nearest Neighbor)
+                [k, idx, _] = pcd_tree.search_knn_vector_3d(pad_world_pos, 1)
+                
+                if k > 0:
+                    nearest_surface_point = all_points[idx[0]]
+                    contact_points.append(nearest_surface_point)
+                else:
+                    # If no neighbor found, fallback to theoretical position
+                    contact_points.append(pad_world_pos)
 
-        # Returns: [Projected Points], Original Pose (Unchanged)
-        return contact_points, tcp_pose
+            # Returns: [Projected Points], Original Pose (Unchanged)
+            return contact_points, tcp_pose
+        except Exception:
+            return []
 
 
 # --- Strategy Registry ---

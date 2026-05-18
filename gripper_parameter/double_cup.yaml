@@ -37,7 +37,7 @@ gripper:
   # --- BODY CONFIG ---
   # The main gripper body that holds the suction cups
   body:
-    radius: 0.023   # Raio do corpo que segura as ventosas
+    radius: 0.020   # Raio do corpo que segura as ventosas
     length: 0.10   # Comprimento total do corpo
   # --- SAFETY PARAMETERS ---
   safety:

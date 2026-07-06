@@ -412,6 +412,117 @@ def refine_registration(
     return result
 
 
+def align_point_clouds(
+    target_geom,
+    source_geom,
+    voxel_size: Optional[float] = None,
+    num_samples: int = 10000,
+) -> np.ndarray:
+    """
+    Aligns the source geometry (second point cloud/geometry) to the target geometry (first point cloud/geometry).
+    Both inputs can be a GenericGeometry, open3d.geometry.PointCloud, open3d.geometry.TriangleMesh,
+    trimesh.PointCloud, or trimesh.Trimesh.
+
+    This function first performs a RANSAC-based global registration using FPFH features to find
+    a coarse initial alignment, and then refines it using Point-to-Plane ICP (Iterative Closest Point).
+
+    Args:
+        target_geom: The reference/first geometry. The coordinate frame of this geometry
+                     will be the target frame.
+        source_geom: The second geometry, which will be transformed to align with the first one.
+        voxel_size: Voxel size for downsampling. If None, it is estimated automatically
+                    from the bounding box diagonal of the target geometry.
+        num_samples: Number of points to sample if the input geometries are meshes (e.g. CAD Step file).
+
+    Returns:
+        np.ndarray: A 4x4 homogeneous transformation matrix that, when applied to the
+                    source geometry (source_geom), aligns it with the target geometry.
+    """
+    # 1. Convert inputs to Open3D PointCloud
+    target_pcd = _convert_to_o3d_point_cloud(target_geom, num_points=num_samples)
+    source_pcd = _convert_to_o3d_point_cloud(source_geom, num_points=num_samples)
+
+    # 2. Estimate voxel size if not provided
+    if voxel_size is None or voxel_size <= 0.0:
+        aabb = target_pcd.get_axis_aligned_bounding_box()
+        diagonal = np.linalg.norm(aabb.get_extent())
+        # Safe heuristic: 3% of bounding box diagonal
+        voxel_size = diagonal * 0.03
+        if voxel_size < 1e-7:
+            voxel_size = 0.005  # Fallback to 5mm if diagonal is extremely small or zero
+        print(f"[GeometryUtils] Automatically estimated voxel size: {voxel_size:.6f}")
+
+    # 3. Clean and Downsample + FPFH feature calculation
+    # We copy the point clouds to avoid modifying input geometries in place
+    source_pcd_temp = copy.deepcopy(source_pcd)
+    target_pcd_temp = copy.deepcopy(target_pcd)
+
+    # Downsample and compute FPFH features for global registration
+    source_down, source_fpfh = preprocess_point_cloud(source_pcd_temp, voxel_size)
+    target_down, target_fpfh = preprocess_point_cloud(target_pcd_temp, voxel_size)
+
+    # 4. Perform Global RANSAC registration
+    print("[GeometryUtils] Running RANSAC-based global registration...")
+    ransac_result = execute_global_registration(
+        source_down, target_down, source_fpfh, target_fpfh, voxel_size
+    )
+    print(f"[GeometryUtils] RANSAC registration finished. Fitness: {ransac_result.fitness:.4f}, RMSE: {ransac_result.inlier_rmse:.6f}")
+
+    # 5. Estimate normals for local ICP refinement (Point-to-Plane requires target normals)
+    radius_normal = voxel_size * 2.0
+    source_pcd_temp.estimate_normals(
+        o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30)
+    )
+    target_pcd_temp.estimate_normals(
+        o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30)
+    )
+
+    # 6. Perform Point-to-Plane ICP refinement using RANSAC's result as initial guess
+    print("[GeometryUtils] Running ICP local refinement (Point-to-Plane)...")
+    icp_result = refine_registration(
+        source_pcd_temp, target_pcd_temp, ransac_result.transformation, voxel_size
+    )
+    print(f"[GeometryUtils] ICP registration finished. Fitness: {icp_result.fitness:.4f}, RMSE: {icp_result.inlier_rmse:.6f}")
+
+    return icp_result.transformation
+
+
+def _convert_to_o3d_point_cloud(geom, num_points: int = 10000) -> o3d.geometry.PointCloud:
+    """
+    Converts various 3D geometry types into an Open3D PointCloud.
+    Handles GenericGeometry, Open3D/Trimesh point clouds/meshes.
+    """
+    # Use duck typing to avoid circular import with GenericGeometry
+    if hasattr(geom, "to_point_cloud"):
+        pcd = geom.to_point_cloud(num_points=num_points)
+        if hasattr(pcd, "geometry"):
+            return pcd.geometry
+        return pcd
+
+    if isinstance(geom, o3d.geometry.PointCloud):
+        return geom
+
+    if isinstance(geom, o3d.geometry.TriangleMesh):
+        if len(geom.triangles) == 0:
+            raise ValueError("Input Open3D TriangleMesh has no triangles to sample from.")
+        return geom.sample_points_poisson_disk(num_points)
+
+    if isinstance(geom, trimesh.PointCloud):
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(np.asarray(geom.vertices))
+        return pcd
+
+    if isinstance(geom, trimesh.Trimesh):
+        # Sample points from trimesh surface
+        points, _ = trimesh.sample.sample_surface(geom, num_points)
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+        return pcd
+
+    raise TypeError(f"Unsupported geometry type for alignment: {type(geom)}")
+
+
+
 # ==============================================================================
 # 4. Advanced Geometry (Slicing, Projection, Contours)
 # ==============================================================================

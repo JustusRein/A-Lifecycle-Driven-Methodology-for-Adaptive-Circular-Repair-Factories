@@ -59,9 +59,9 @@ class BaseGraspSampler(Generic[TGripper, TConfig, TScoreDetails], metaclass=ABCM
         for i, mesh in enumerate(obstacles):
             self.collision_manager.add_object(f"env_obstacle_{i}", mesh)
 
-        print(
-            f"[BaseGraspSampler] Environment updated with {len(obstacles)} obstacles."
-        )
+        # print(
+        #     f"[BaseGraspSampler] Environment updated with {len(obstacles)} obstacles."
+        # )
 
     def check_collision(self, safety_mesh: trimesh.Trimesh) -> bool:
         """

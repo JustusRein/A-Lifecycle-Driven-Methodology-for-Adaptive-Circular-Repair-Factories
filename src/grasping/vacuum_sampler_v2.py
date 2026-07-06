@@ -88,6 +88,8 @@ class VacuumSamplerConfig:
     debug_score: bool = (
         False  # Calculate all attributes even if it fails for final score
     )
+    debug_view_raycasting: bool = False
+    debug_hull_generation: bool = False
 
 
 class VacuumGraspSampler(
@@ -103,15 +105,15 @@ class VacuumGraspSampler(
 
         strategy_name = self.gripper.config.grasp_strategy
         if strategy_name not in STRATEGY_REGISTRY:
-            print(
-                f"[Warning] Strategy '{strategy_name}' not found. Fallback to 'projection'."
-            )
+            # print(
+            #     f"[Warning] Strategy '{strategy_name}' not found. Fallback to 'projection'."
+            # )
             raise ValueError(
                 f"Unknown strategy: {strategy_name}. Available: {list(STRATEGY_REGISTRY.keys())}"
             )
 
         self.strategy = STRATEGY_REGISTRY[strategy_name]()
-        print(f"[VacuumSampler] Using Contact Strategy: {strategy_name}")
+        # print(f"[VacuumSampler] Using Contact Strategy: {strategy_name}")
 
     def sample_grasps(
         self, pcd: o3d.geometry.PointCloud
@@ -133,7 +135,7 @@ class VacuumGraspSampler(
         # 1. Phase 1: Generation (Geometry + Collision)
         self._generate_candidates(pcd)
 
-        print(f"[VacuumSampler] Phase 1: Generated {len(self.candidates)} candidates.")
+        # print(f"[VacuumSampler] Phase 1: Generated {len(self.candidates)} candidates.")
 
         if not self.candidates:
             return []
@@ -147,12 +149,12 @@ class VacuumGraspSampler(
         ]
         self.valid_candidates.sort(key=lambda x: x.score, reverse=True)
 
-        print(f"[VacuumSampler] Result: {len(self.valid_candidates)} valid grasps.")
+        # print(f"[VacuumSampler] Result: {len(self.valid_candidates)} valid grasps.")
         return self.valid_candidates
 
     def _validate_input(self, pcd: o3d.geometry.PointCloud) -> bool:
         if not pcd.has_points():
-            print("[VacuumSampler] Error: Empty Point Cloud.")
+            # print("[VacuumSampler] Error: Empty Point Cloud.")
             return False
         if not pcd.has_normals():
             pcd.estimate_normals()
@@ -168,7 +170,9 @@ class VacuumGraspSampler(
         """
         # A. Setup Raycasting Scene using the configured hull type
         scene = gu.create_raycasting_scene(
-            pcd, hull_type=self.config.raycasting_hull_type
+            pcd,
+            hull_type=self.config.raycasting_hull_type,
+            debug_visualize=self.config.debug_hull_generation,
         )
         if scene is None:
             return
@@ -184,8 +188,9 @@ class VacuumGraspSampler(
         t_hits = results["t_hit"].numpy()
 
         # >>> CHAMADA DE DEBUG <<< (Pode comentar depois se quiser silenciar)
-        max_dim = np.max(pcd.get_max_bound() - pcd.get_min_bound())
-        self._debug_raycasting(pcd, rays_list, t_hits, radius=(max_dim / 2) * 1.5)
+        if self.config.debug_view_raycasting:
+            max_dim = np.max(pcd.get_max_bound() - pcd.get_min_bound())
+            self._debug_raycasting(pcd, rays_list, t_hits, radius=(max_dim / 2) * 1.5)
 
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
 
@@ -359,7 +364,7 @@ class VacuumGraspSampler(
             inside_mask = safety_mesh.contains(pts)
             return np.sum(inside_mask) > 5
         except Exception as e:
-            print(f"[Warning] Failed to run 'contains' on gripper mesh. Error: {e}")
+            # print(f"[Warning] Failed to run 'contains' on gripper mesh. Error: {e}")
             return False
 
     # ====================================================================
@@ -608,9 +613,9 @@ class VacuumGraspSampler(
                 # The expected point count requires the global density, not the local one
                 expected_count = global_density * target_area
                 valid_count = len(pts)
-                print(
-                    f"[Debug Sealing] Expected: {expected_count:.1f} | Valid: {valid_count} | Spacing: {avg_point_spacing:.4f}"
-                )
+                # print(
+                #     f"[Debug Sealing] Expected: {expected_count:.1f} | Valid: {valid_count} | Spacing: {avg_point_spacing:.4f}"
+                # )
                 if valid_count == 0:
                     zone_scores.append(0.0)
                     continue
@@ -816,7 +821,7 @@ class VacuumGraspSampler(
     ):
         cands = self.valid_candidates if valid_only else self.candidates
         if not cands:
-            print("[Visualizer] No candidates.")
+            # print("[Visualizer] No candidates.")
             return
 
         geometries = []
@@ -860,7 +865,7 @@ class VacuumGraspSampler(
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
         com_xy, max_torque_arm = self._calculate_global_stats(pcd, all_points)
 
-        print(f"--- Debugging Grasp at {candidate.contact_point} ---")
+        # print(f"--- Debugging Grasp at {candidate.contact_point} ---")
         self._evaluate_single_candidate(
             candidate, pcd_tree, all_points, all_normals, com_xy, max_torque_arm, True
         )
@@ -922,9 +927,9 @@ class VacuumGraspSampler(
             hits_pcd.paint_uniform_color([0.0, 0.0, 1.0])
             geometries.append(hits_pcd)
 
-        print(
-            f"[Debug] Abrindo Visualizador de Raycasting ({self.config.raycasting_hull_type})..."
-        )
+        # print(
+        #     f"[Debug] Abrindo Visualizador de Raycasting ({self.config.raycasting_hull_type})..."
+        # )
         o3d.visualization.draw_geometries(
             geometries,
             window_name=f"Raycasting Debug - {self.config.raycasting_hull_type}",

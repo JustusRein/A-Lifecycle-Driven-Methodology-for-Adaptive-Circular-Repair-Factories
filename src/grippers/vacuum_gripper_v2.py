@@ -57,12 +57,13 @@ class VacuumGripper(BaseGripper):
         self._log_init()
 
     def _log_init(self):
-        print(f"🔧 Vacuum Gripper '{self.config.name}' initialized.")
-        print(f"   - Active Pads: {len(self.config.pads)}")
-        if self.config.visual_mesh_path:
-            print(
-                f"   - External Asset: {os.path.basename(self.config.visual_mesh_path)}"
-            )
+        pass
+        # print(f"🔧 Vacuum Gripper '{self.config.name}' initialized.")
+        # print(f"   - Active Pads: {len(self.config.pads)}")
+        # if self.config.visual_mesh_path:
+        #     print(
+        #         f"   - External Asset: {os.path.basename(self.config.visual_mesh_path)}"
+        #     )
 
     # =========================================================================
     # 1. Configuration Loading Logic
@@ -162,7 +163,8 @@ class VacuumGripper(BaseGripper):
                 try:
                     geometry_wrapper.transform(translation=offset_vector)
                 except Exception as e:
-                    print(f"[Warning] Could not apply offset to collision mesh: {e}")
+                    pass
+                    # print(f"[Warning] Could not apply offset to collision mesh: {e}")
 
         # 2. Fallback to procedural generation
         if geometry_wrapper is None:

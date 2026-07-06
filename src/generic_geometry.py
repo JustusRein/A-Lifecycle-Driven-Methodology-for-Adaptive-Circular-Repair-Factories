@@ -32,9 +32,10 @@ def inplace_result(func: Callable):
             if result_geometry is not None:
                 self.set_geometry(result_geometry)
             else:
-                print(
-                    f"Warning: Method {func.__name__} returned None, inplace update ignored."
-                )
+                pass
+                # print(
+                #     f"Warning: Method {func.__name__} returned None, inplace update ignored."
+                # )
 
         return result_geometry
 
@@ -81,7 +82,7 @@ class GenericGeometry:
             raise TypeError(f"Unsupported geometry type: {type(geometry).__name__}")
 
         self.geometry = geometry
-        print(f"✅ Geometry set: {self.geometry_type} ({self.backend})")
+        # print(f"✅ Geometry set: {self.geometry_type} ({self.backend})")
 
     def load_file(
         self,
@@ -123,7 +124,7 @@ class GenericGeometry:
         if self.geometry_type == "point_cloud":
             return geom_o3d  # Already a PCD
 
-        print(f"Sampling {num_points} points from mesh...")
+        # print(f"Sampling {num_points} points from mesh...")
         pcd = geom_o3d.sample_points_poisson_disk(num_points)
         return pcd
 
@@ -138,7 +139,7 @@ class GenericGeometry:
 
         geom_o3d = self._as_open3d()
 
-        print("Computing Convex Hull...")
+        # print("Computing Convex Hull...")
         hull, _ = geom_o3d.compute_convex_hull()
         hull.compute_vertex_normals()
         return hull
@@ -160,7 +161,7 @@ class GenericGeometry:
             pcd = geom_o3d
 
         if not pcd.has_normals():
-            print("Estimating normals for Poisson...")
+            # print("Estimating normals for Poisson...")
             pcd.estimate_normals(
                 search_param=o3d.geometry.KDTreeSearchParamHybrid(
                     radius=0.01, max_nn=30
@@ -174,13 +175,13 @@ class GenericGeometry:
         pcd.orient_normals_towards_camera_location(camera_pos)
         # pcd.orient_normals_consistent_tangent_plane(15)
 
-        print(f"Running Poisson reconstruction (depth={depth})...")
+        # print(f"Running Poisson reconstruction (depth={depth})...")
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
             pcd, depth=depth
         )
 
         if cleanup:
-            print("Cleaning up low density artifacts...")
+            # print("Cleaning up low density artifacts...")
             vertices_to_remove = densities < np.quantile(densities, 0.05)
             mesh.remove_vertices_by_mask(vertices_to_remove)
 
@@ -199,12 +200,12 @@ class GenericGeometry:
 
         # If Mesh, sample densely first to capture shape, then downsample
         if self.geometry_type == "mesh":
-            print("Input is Mesh. Sampling surface before downsampling...")
+            # print("Input is Mesh. Sampling surface before downsampling...")
             pcd = geom_o3d.sample_points_poisson_disk(number_of_points=100000)
         else:
             pcd = geom_o3d
 
-        print(f"Downsampling with voxel_size={voxel_size}...")
+        # print(f"Downsampling with voxel_size={voxel_size}...")
         pcd_down = pcd.voxel_down_sample(voxel_size)
         return pcd_down
 
@@ -221,7 +222,7 @@ class GenericGeometry:
         if self.backend == "trimesh":
             return self.geometry
 
-        print("🔄 Converting Open3D object to Trimesh...")
+        # print("🔄 Converting Open3D object to Trimesh...")
 
         if self.geometry_type == "mesh":
             return self._open3d_mesh_to_trimesh(self.geometry)
@@ -241,7 +242,7 @@ class GenericGeometry:
 
         # Ensure we save using Open3D for consistency
         geom_o3d = self._as_open3d()
-        print(f"💾 Saving to: {output_path}")
+        # print(f"💾 Saving to: {output_path}")
 
         if self.geometry_type == "point_cloud":
             o3d.io.write_point_cloud(output_path, geom_o3d, write_ascii=write_ascii)
@@ -256,7 +257,7 @@ class GenericGeometry:
         Opens a visualization window using Open3D.
         """
         if self.geometry is None:
-            print("❌ Nothing to visualize.")
+            # print("❌ Nothing to visualize.")
             return
 
         geom = self._as_open3d()
@@ -278,7 +279,7 @@ class GenericGeometry:
             try:
                 mesh = o3d.io.read_triangle_mesh(path)
                 if not mesh.is_empty() and len(mesh.triangles) > 0:
-                    print(f"[Open3D] Loaded Mesh: {path}")
+                    # print(f"[Open3D] Loaded Mesh: {path}")
                     return mesh
             except Exception:
                 pass
@@ -287,7 +288,7 @@ class GenericGeometry:
             try:
                 pcd = o3d.io.read_point_cloud(path)
                 if not pcd.is_empty():
-                    print(f"[Open3D] Loaded PointCloud: {path}")
+                    # print(f"[Open3D] Loaded PointCloud: {path}")
                     return pcd
             except Exception:
                 pass
@@ -308,9 +309,11 @@ class GenericGeometry:
                 raise ValueError("Object is not a point cloud")
 
             if is_mesh:
-                print(f"[Trimesh] Loaded Mesh: {path}")
+                # print(f"[Trimesh] Loaded Mesh: {path}")
+                pass
             else:
-                print(f"[Trimesh] Loaded PointCloud: {path}")
+                # print(f"[Trimesh] Loaded PointCloud: {path}")
+                pass
 
             assert isinstance(geom, TrimeshTypes)
             return geom
@@ -435,8 +438,51 @@ class GenericGeometry:
             T[:3, 3] = translation
 
         # 2. Apply Transformation
-        print("Applying rigid transformation...")
+        # print("Applying rigid transformation...")
         return geom_o3d.transform(T)
+
+    @inplace_result
+    def apply_transform(self, T: np.ndarray) -> Geometry3D:
+        """
+        Applies a 4x4 homogeneous transformation matrix to the geometry.
+        """
+        if self.geometry is None:
+            raise ValueError("No geometry loaded")
+
+        geom_o3d = self._as_open3d()
+        return geom_o3d.transform(T)
+
+    def align_to(
+        self,
+        reference_geometry,
+        voxel_size: Optional[float] = None,
+        num_samples: int = 10000,
+        inplace: bool = False,
+    ) -> np.ndarray:
+        """
+        Aligns this geometry (source) to the reference_geometry (target).
+        Returns the 4x4 transformation matrix that, applied to this geometry,
+        puts it in the same reference frame as the reference_geometry.
+
+        Args:
+            reference_geometry: The reference geometry (target).
+            voxel_size: Voxel size for downsampling.
+            num_samples: Number of points to sample if geometry is a mesh.
+            inplace: If True, applies the estimated transformation to this geometry.
+        """
+        from src.utils.geometry_utils import align_point_clouds
+
+        T = align_point_clouds(
+            target_geom=reference_geometry,
+            source_geom=self,
+            voxel_size=voxel_size,
+            num_samples=num_samples,
+        )
+
+        if inplace:
+            self.apply_transform(T, inplace=True)
+
+        return T
 
     @inplace_result
     def filter_by_normal(
@@ -459,7 +505,7 @@ class GenericGeometry:
         # Calculate cosine threshold from degrees
         cos_threshold = np.cos(np.radians(angle_tolerance))
 
-        print(f"Filtering by normal direction {direction} (tol={angle_tolerance}°)...")
+        # print(f"Filtering by normal direction {direction} (tol={angle_tolerance}°)...")
 
         # Delegate to utility function
         filtered_pcd, _ = gu.filter_pcd_by_normal_direction(
@@ -481,7 +527,7 @@ class GenericGeometry:
 
         pcd = self.to_point_cloud(inplace=False)
 
-        print(f"Removing statistical outliers (k={nb_neighbors}, std={std_ratio})...")
+        # print(f"Removing statistical outliers (k={nb_neighbors}, std={std_ratio})...")
 
         # Delegate to utility function
         clean_pcd, _ = gu.remove_outliers_statistical(
@@ -556,7 +602,7 @@ class GenericGeometry:
 
         pcd = self.to_point_cloud(inplace=False, num_points=num_points)
 
-        print(f"Clustering with DBSCAN (eps={eps}, min_pts={min_points})...")
+        # print(f"Clustering with DBSCAN (eps={eps}, min_pts={min_points})...")
 
         # Delegate to utility function
         main_cluster = gu.remove_outliers_dbscan(pcd, eps=eps, min_points=min_points)
@@ -585,7 +631,7 @@ class GenericGeometry:
         # Ensure it's a Point Cloud (Meshes usually have vertex normals, but this recalculates/refines them)
         pcd = self.to_point_cloud(inplace=False)
 
-        print(f"Estimating normals (radius={radius}, k={max_nn})...")
+        # print(f"Estimating normals (radius={radius}, k={max_nn})...")
 
         # Delegate to utility function
         pcd_normals = gu.compute_pcd_normals(
@@ -617,13 +663,13 @@ class GenericGeometry:
         """
         # 0. Ensure it is a Point Cloud
         self.to_point_cloud(inplace=True)
-        print(f"[Clean] Points before processing: {len(self.geometry.points)}")
+        # print(f"[Clean] Points before processing: {len(self.geometry.points)}")
 
         # 1. Voxel Downsampling (CRITICAL: Must happen BEFORE statistical removal)
         # Standardizes point density and drastically speeds up the next algorithms
         if voxel_size > 0.0:
             self.geometry = self.geometry.voxel_down_sample(voxel_size=voxel_size)
-            print(f"[Clean] Points after Downsample: {len(self.geometry.points)}")
+            # print(f"[Clean] Points after Downsample: {len(self.geometry.points)}")
 
         # 2. Statistical Outlier Removal
         # Removes "flying pixels" and sparse noise (dust) around the object.
@@ -646,7 +692,7 @@ class GenericGeometry:
         else:
             pcd_clean.orient_normals_consistent_tangent_plane(k=15)
 
-        print(f"[Clean] Points after full cleaning: {len(self.geometry.points)}")
+        # print(f"[Clean] Points after full cleaning: {len(self.geometry.points)}")
         return pcd_clean
 
     def scale(self, scale_factor: float, center: bool = False):

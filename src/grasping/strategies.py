@@ -95,7 +95,7 @@ class MultiPadProjectionStrategy(GraspContactStrategy):
 
                 # Safety: Check for NaN/Inf (prevents KD-Tree crash)
                 if not np.all(np.isfinite(pad_world_pos)):
-                    print(f"[Warning] Invalid Pad Position calculated: {pad_world_pos}. Using TCP as fallback.")
+                    # print(f"[Warning] Invalid Pad Position calculated: {pad_world_pos}. Using TCP as fallback.")
                     contact_points.append(t_tcp)
                     continue
 

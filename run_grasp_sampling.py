@@ -56,7 +56,7 @@ def main():
     np.random.seed(args.seed)
     o3d.utility.random.seed(args.seed)
 
-    print(f"🚀 Initializing Grasp Sampler script")
+    print(f" Initializing Grasp Sampler script")
     print(f"   - Object: {args.object_path}")
     print(f"   - Gripper: {args.gripper_path}")
     print(f"   - Seed: {args.seed}")
@@ -67,7 +67,7 @@ def main():
 
     # 3. Load Configurations
     if not os.path.exists(args.config_path):
-        print(f"❌ Error: Config file not found at {args.config_path}")
+        print(f" Error: Config file not found at {args.config_path}")
         sys.exit(1)
 
     with open(args.config_path, "r") as f:
@@ -127,7 +127,7 @@ def main():
     # Global Ranking
     all_candidates.sort(key=lambda x: x.score, reverse=True)
     num_candidates = len(all_candidates)
-    print(f"✨ Sampling complete. Found {num_candidates} valid candidates.")
+    print(f" Sampling complete. Found {num_candidates} valid candidates.")
 
     # 9. Format Results
     results = {
@@ -156,16 +156,16 @@ def main():
         results["best_grasp"] = results["all_candidates"][0]
         best_pos = results["best_grasp"]["position"]
         best_score = results["best_grasp"]["score"]
-        print(f"🏆 Best Grasp: Score {best_score:.4f} at Position {best_pos}")
+        print(f" Best Grasp: Score {best_score:.4f} at Position {best_pos}")
     else:
-        print("⚠️ No valid candidates found.")
+        print(" No valid candidates found.")
 
     # 10. Write Results to JSON
     output_file = pjoin(args.output_dir, f"results_{args.seed}.json")
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
         
-    print(f"💾 Results saved successfully to {output_file}\n")
+    print(f" Results saved successfully to {output_file}\n")
 
 if __name__ == "__main__":
     main()

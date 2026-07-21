@@ -42,7 +42,7 @@ class VacuumSamplerConfig:
 
     # Sampling Parameters
     raycasting_samples: RaycastingPatternDict = field(
-        default_factory=lambda: {"sphere": 100, "top_down": 150}
+        default_factory=lambda: {"sphere": 200, "top_down": 0}
     )
     # --- Raycasting & Mesh Generation ---
     raycasting_hull_type: Literal["convex", "bpa", "poisson", "alpha"] = "alpha"
@@ -172,7 +172,7 @@ class VacuumGraspSampler(
         scene = gu.create_raycasting_scene(
             pcd,
             hull_type=self.config.raycasting_hull_type,
-            debug_visualize=self.config.debug_hull_generation,
+            debug_visualize=False,
         )
         if scene is None:
             return
@@ -438,7 +438,7 @@ class VacuumGraspSampler(
         all_normals = np.asarray(pcd.normals)
 
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
-        com_xy, max_torque_arm = self._calculate_global_stats(pcd, all_points)
+        center_of_mass, max_torque_arm = self._calculate_global_stats(pcd, all_points)
 
         # Calculate the resolution (virtual voxel size) once per point cloud
         distances = pcd.compute_nearest_neighbor_distance()
@@ -449,7 +449,7 @@ class VacuumGraspSampler(
                 pcd_tree,
                 all_points,
                 all_normals,
-                com_xy,
+                center_of_mass,
                 max_torque_arm,
                 avg_point_spacing,
             )
@@ -461,7 +461,7 @@ class VacuumGraspSampler(
         all_normals = np.asarray(pcd.normals)
 
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
-        com_xy, max_torque_arm = self._calculate_global_stats(pcd, all_points)
+        center_of_mass, max_torque_arm = self._calculate_global_stats(pcd, all_points)
 
         for idx in debug_idx:
             cand = self.candidates[idx]
@@ -470,7 +470,7 @@ class VacuumGraspSampler(
                 pcd_tree,
                 all_points,
                 all_normals,
-                com_xy,
+                center_of_mass,
                 max_torque_arm,
                 debug=True,
             )
@@ -481,7 +481,7 @@ class VacuumGraspSampler(
         pcd_tree: o3d.geometry.KDTreeFlann,
         all_points: np.ndarray,
         all_normals: np.ndarray,
-        com_xy: np.ndarray,
+        center_of_mass: np.ndarray,
         max_torque_arm: float,
         avg_point_spacing: float,
         debug: bool = False,
@@ -497,7 +497,7 @@ class VacuumGraspSampler(
                 self._mark_candidate_failed(cand, "bad_angle")
                 return
 
-        s_torque = self._calculate_torque(cand, com_xy, max_torque_arm)
+        s_torque = self._calculate_torque(cand, center_of_mass, max_torque_arm)
 
         resolution = self.strategy.resolve_contacts(
             cand.transform, self.gripper.config.pads, pcd_tree, all_points
@@ -718,13 +718,20 @@ class VacuumGraspSampler(
     # =========================================================================
 
     def _calculate_global_stats(self, pcd, all_points):
+        """
         center_of_mass = pcd.get_center()
         com_xy = center_of_mass[:2]
         dists = np.linalg.norm(all_points[:, :2] - com_xy, axis=1)
         max_torque = np.max(dists) if len(dists) > 0 else 1.0
         return com_xy, max_torque
-
+        """
+        center_of_mass = pcd.get_center()
+        dists = np.linalg.norm(all_points - center_of_mass, axis=1)
+        max_torque = np.max(dists) if len(dists) > 0 else 1.0
+        return center_of_mass, max_torque 
+        
     def _calculate_verticality(self, cand, conservative: bool = True):
+        """
         z_axis = np.array([0, 0, 1])
         normal = -cand.approach_vector
         dot = np.dot(normal, z_axis)
@@ -738,10 +745,17 @@ class VacuumGraspSampler(
 
         s_vert = 1.0 - (angle_deg / self.config.max_angle_deg)
         return decay_factor * (np.clip(s_vert, 0.0, 1.0)), angle_deg
+        """
+        return 1.0, 0.0
 
-    def _calculate_torque(self, cand, com_xy, max_torque):
+    def _calculate_torque(self, cand, center_of_mass, max_torque):
+        """
         grasp_xy = cand.contact_point[:2]
         dist = np.linalg.norm(grasp_xy - com_xy)
+        s_torque = 1.0 - (dist / max_torque)
+        return np.clip(s_torque, 0.0, 1.0)
+        """
+        dist = np.linalg.norm(cand.contact_point - center_of_mass)
         s_torque = 1.0 - (dist / max_torque)
         return np.clip(s_torque, 0.0, 1.0)
 
@@ -863,11 +877,11 @@ class VacuumGraspSampler(
         all_points = np.asarray(pcd.points)
         all_normals = np.asarray(pcd.normals)
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
-        com_xy, max_torque_arm = self._calculate_global_stats(pcd, all_points)
+        center_of_mass, max_torque_arm = self._calculate_global_stats(pcd, all_points)
 
         # print(f"--- Debugging Grasp at {candidate.contact_point} ---")
         self._evaluate_single_candidate(
-            candidate, pcd_tree, all_points, all_normals, com_xy, max_torque_arm, True
+            candidate, pcd_tree, all_points, all_normals, center_of_mass, max_torque_arm, True
         )
 
         self.visualize_grasp(pcd, candidate, show_safety_volume=True)
@@ -930,11 +944,12 @@ class VacuumGraspSampler(
         # print(
         #     f"[Debug] Abrindo Visualizador de Raycasting ({self.config.raycasting_hull_type})..."
         # )
+        """
         o3d.visualization.draw_geometries(
             geometries,
             window_name=f"Raycasting Debug - {self.config.raycasting_hull_type}",
         )
-
+        """
 
 def debug_pad_projection(pad, local_points_3d, zone_dict):
     """

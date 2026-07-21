@@ -35,6 +35,11 @@ conda env create -f environment_windows.yml (for windows)
 conda activate <env_name>
 ```
 
+venv in windows without yml
+- "py -3.12 -m venv .venv"
+- ".venv/Scripts/activate"
+- "pip install -r requirements.txt"
+
 ### 2. Running the Pipeline
 The most intuitive way to use this framework is through the **Playground**:
 1. Open `jupyter lab`

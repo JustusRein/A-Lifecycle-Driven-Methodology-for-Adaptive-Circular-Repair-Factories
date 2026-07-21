@@ -1,2 +1,0 @@
-
-{"seal_score": 0.0, "verticality": 0.0, "torque": 0.3157077677647989, "raw_angle_deg": 90.0, "pad_scores": {"left_cup": 0.0}, "failure_reason": ["bad_angle", "bad_seal"], "score": 0.0, "position": [0.03862610462008441, 0.15267507934570312, 0.10759250714390042], "direction": [-0.0, -1.0, -0.0]}

@@ -48,7 +48,7 @@ def main():
         if f.lower().endswith((".stl", ".obj", ".ply", ".pcd"))
     ]
 
-    seeds = range(1, 2)
+    seeds = range(1, 501)
 
     print(f"Found {len(objects)} objects:")
     for obj in objects:

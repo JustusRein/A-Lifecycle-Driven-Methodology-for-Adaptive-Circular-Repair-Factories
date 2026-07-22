@@ -45,9 +45,10 @@ def main():
     parser.add_argument("seed", type=int, help="Random seed for NumPy, Python, and Open3D")
     parser.add_argument("--config_path", type=str, default=pjoin("config", "config.yaml"), help="Path to config.yaml")
     parser.add_argument("--scale", type=float, default=1.0, help="Optional scaling factor for the object")
-    parser.add_argument("--align", action="store_true", help="If set, aligns the largest plane to Z-axis using RANSAC")
     parser.add_argument("--ransac_iterations", type=int, default=5000, help="Number of iterations for RANSAC segmentation")
     parser.add_argument("--voxel_size", type=float, default=None, help="Optional downsample voxel size (defaults to suggested/2)")
+    parser.add_argument("--obstacle", type=str, default=None, help="Optional obstacle point cloud")
+    parser.add_argument("--align", action="store_true", help="Enable RANSAC alignment")
 
     args = parser.parse_args()
 
@@ -83,32 +84,35 @@ def main():
     # 4. Initialize Objects
     gripper = VacuumGripper(args.gripper_path)
     pcd = GenericGeometry(args.object_path)
+    obstacle = None
+
+    if args.obstacle is not None:
+        obstacle = GenericGeometry(args.obstacle)
 
     # 5. Optional Scale
     if args.scale != 1.0:
         print(f"   - Scaling object by factor: {args.scale}")
         pcd.scale(args.scale)
 
+    if obstacle is not None:
+        obstacle.scale(args.scale)
+    
     # 6. Geometric Normalization & Downsample
     report = pcd.get_dimensions_report()
     voxel_size = args.voxel_size if args.voxel_size is not None else (report["suggested_voxel_size"] / 2.0)
     print(f"   - Voxel Size: {voxel_size:.6f} m")
     
-    pcd_down = pcd.downsample(voxel_size=voxel_size)
+    pcd_down = pcd.downsample(voxel_size)
     pcd_down = GenericGeometry(geometry=pcd_down)
 
+    obstacle_down = None
+
+    if obstacle is not None:
+        obstacle_down = obstacle.downsample(voxel_size)
+        obstacle_down = GenericGeometry(geometry=obstacle_down)
+
     # 7. Alignment
-    if args.align:
-        print("   - Aligning largest plane to Z-axis (RANSAC)...")
-        pcd_aligned_list = gu.align_largest_plane_to_z(
-            pcd_down.geometry,
-            distance_threshold=1.5 * voxel_size,
-            n_iterations=args.ransac_iterations,
-            k=3,
-            theta_min_diff=30.0
-        )
-    else:
-        pcd_aligned_list = [pcd_down.geometry]
+    pcd_aligned_list = [pcd_down.geometry]
 
     # 8. Grasp Sampling
     print("   - Starting sampling loop...")
@@ -116,7 +120,10 @@ def main():
     
     for idx, aligned_geom in enumerate(pcd_aligned_list):
         sampler = VacuumGraspSampler(gripper, sampler_config)
-        found_grasps = sampler.sample_grasps(aligned_geom)
+        found_grasps = sampler.sample_grasps(
+            object_pcd=aligned_geom,
+            obstacle_pcd=obstacle_down.geometry if obstacle_down else None
+)
         
         # Mark orientation index
         for g in found_grasps:
